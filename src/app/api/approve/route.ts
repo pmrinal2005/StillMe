@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { getCandidates, latestTurn } from '@/lib/server/state'
+import { activeSession, getCandidates, latestTurn } from '@/lib/server/state'
 import { ApproveRequest, type TurnRef } from '@/lib/contracts'
 import { ApprovalError, issueApproval } from '@/lib/approval'
 import { materialChange } from '@/lib/turns'
@@ -33,6 +33,12 @@ export async function POST(req: Request) {
   const parsed = ApproveRequest.extend({ voice: VoiceAttestation }).safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request', issues: parsed.error.issues.slice(0, 5) }, 400)
   const { voice, ...body } = parsed.data
+
+  // Room approvals must target the caller's own active conversation (wrong-room protection).
+  if (body.roomName) {
+    const s = activeSession(id.userId)
+    if (!s || s.room !== body.roomName || s.conversationId !== body.conversationId) return json({ error: 'wrong_room' }, 403)
+  }
 
   // Voice authorization: library voices are allowed; cloned voices require complete, unexpired consent.
   if (!isLibraryVoice(body.voiceId)) {

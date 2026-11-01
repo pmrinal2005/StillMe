@@ -150,10 +150,11 @@ export const ControlMessage = z.discriminatedUnion('type', [
   z.object({ type: z.literal('speak'), approval: Approval, text: z.string().min(1).max(MAX_SPOKEN_CHARS) }),
   z.object({ type: z.literal('stop'), playbackAttemptId: z.string().optional() }),
   z.object({ type: z.literal('listen'), enabled: z.boolean() }),
+  z.object({ type: z.literal('end') }),
 ])
 
 export const StatusMessage = z.object({
-  type: z.enum(['speaking', 'done', 'cancelled', 'uncertain', 'rejected', 'error', 'listening', 'paused']),
+  type: z.enum(['speaking', 'done', 'cancelled', 'uncertain', 'rejected', 'error', 'listening', 'paused', 'ended', 'ready']),
   playbackAttemptId: z.string().optional(),
   reason: z.string().max(200).optional(),
 })

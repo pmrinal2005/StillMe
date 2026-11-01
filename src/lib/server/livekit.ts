@@ -36,6 +36,7 @@ export interface RoomMetadata {
   outputLanguage: string
   inputLanguages: string[]
   keyterms: string[]
+  contextPrompt?: string
   maxSessionMinutes: number
 }
 

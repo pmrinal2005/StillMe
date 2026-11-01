@@ -8,7 +8,14 @@ import Dexie, { type Table } from 'dexie'
 import type { ClonedVoiceProfile } from '../voices'
 
 export interface Board { id: string; name: string; order: number }
-export interface Phrase { id: string; boardId: string; text: string; order: number; uses: number }
+export interface Phrase { id: string; boardId: string; text: string; order: number; uses: number; cacheable?: boolean }
+/**
+ * Authorized synthesized-audio cache for reusable phrases. Only LIBRARY voices are cached:
+ * cloned-voice audio is never cached, so cached clips can never be used to evade the provider's
+ * 60-day biometric-consent expiry. Entries are keyed by (voiceId, language, textHash).
+ */
+export interface CachedAudio { key: string; voiceId: string; language: string; textHash: string; pcm: ArrayBuffer; sampleRate: number; createdAt: number }
+export interface ConsentEvent { id: string; voiceRecordId: string; action: 'initial' | 'renewal' | 'revocation'; at: number }
 /** Original message-bank recordings (user-authored, independently authorized). Not synthetic. */
 export interface BankedMessage { id: string; label: string; transcript: string; blob: Blob; mime: string; createdAt: number }
 export interface Feedback { id: string; at: number; intent: string; verdict: 'sounds_like_me' | 'not_my_meaning'; edited: boolean }
@@ -21,6 +28,8 @@ class RevoiceDB extends Dexie {
   bank!: Table<BankedMessage, string>
   feedback!: Table<Feedback, string>
   prefs!: Table<Pref, string>
+  audioCache!: Table<CachedAudio, string>
+  consentLog!: Table<ConsentEvent, string>
   constructor() {
     super('revoice')
     this.version(1).stores({
@@ -30,6 +39,10 @@ class RevoiceDB extends Dexie {
       bank: 'id, createdAt',
       feedback: 'id, at',
       prefs: 'key',
+    })
+    this.version(2).stores({
+      audioCache: 'key, voiceId, createdAt',
+      consentLog: 'id, voiceRecordId, at',
     })
   }
 }
@@ -63,10 +76,17 @@ export async function setPref(key: string, value: unknown) {
 }
 
 export async function exportLocal() {
-  const [boards, phrases, voices, feedback, prefs, bank] = await Promise.all([
+  const [boards, phrases, voices, feedback, prefs, bank, consentLog, cacheCount] = await Promise.all([
     db.boards.toArray(), db.phrases.toArray(), db.voices.toArray(), db.feedback.toArray(), db.prefs.toArray(), db.bank.toArray(),
+    db.consentLog.toArray(), db.audioCache.count(),
   ])
-  return { boards, phrases, voices, feedback, prefs, bank: bank.map(({ blob: _b, ...m }) => m) }
+  return {
+    format: 'revoice-local-export-v2',
+    exportedAt: new Date().toISOString(),
+    boards, phrases, voices, feedback, prefs, consentLog,
+    bank: bank.map(({ blob: _b, ...m }) => m),
+    note: `Message-bank audio blobs and ${cacheCount} cached phrase clip(s) are not included in this JSON export.`,
+  }
 }
 
 export async function wipeLocal() {
@@ -74,3 +94,24 @@ export async function wipeLocal() {
 }
 
 export { uid }
+
+const cacheKey = (voiceId: string, language: string, textHash: string) => `${voiceId}|${language}|${textHash}`
+
+export async function getCachedAudio(voiceId: string, language: string, textHash: string) {
+  return db.audioCache.get(cacheKey(voiceId, language, textHash))
+}
+
+export async function putCachedAudio(e: Omit<CachedAudio, 'key' | 'createdAt'>, isLibraryVoice: boolean) {
+  if (!isLibraryVoice) return // never cache cloned-voice audio
+  await db.audioCache.put({ ...e, key: cacheKey(e.voiceId, e.language, e.textHash), createdAt: Date.now() })
+  // keep the cache small
+  const n = await db.audioCache.count()
+  if (n > 60) {
+    const old = await db.audioCache.orderBy('createdAt').limit(n - 60).primaryKeys()
+    await db.audioCache.bulkDelete(old)
+  }
+}
+
+export async function purgeVoiceCache(voiceId: string) {
+  await db.audioCache.where('voiceId').equals(voiceId).delete()
+}

@@ -1,6 +1,9 @@
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { ledgerFor, projectLedger, replayStore } from '@/lib/server/state'
+import { ledgerFor, projectLedger } from '@/lib/server/state'
+import { durableReplay, recordUsage, reserveDurable, settleDurable } from '@/lib/server/durable'
+import { logEvent } from '@/lib/server/log'
+import { PRICES } from '@/lib/budget'
 import { AssemblyError, synthesizeApproved } from '@/lib/server/assemblyai'
 import { SpeakRequest } from '@/lib/contracts'
 import { ApprovalError, verifyApproval } from '@/lib/approval'
@@ -24,9 +27,10 @@ export async function POST(req: Request) {
   const { approval, text } = parsed.data
 
   try {
-    await verifyApproval({ secret: env.approvalSecret(), approval, text, expect: { sub: id.userId, roomName: null }, replay: replayStore() })
+    await verifyApproval({ secret: env.approvalSecret(), approval, text, expect: { sub: id.userId, roomName: null }, replay: durableReplay(id.userId, approval.textHash) })
   } catch (e) {
     if (e instanceof ApprovalError) return json({ error: e.reason }, e.reason === 'wrong_user' ? 403 : 409)
+    if ((e as Error).message === 'replay_store_unavailable') return json({ error: 'replay_store_unavailable' }, 503)
     throw e
   }
 
@@ -38,6 +42,15 @@ export async function POST(req: Request) {
     ledgerFor(id.userId).releaseTts(user.id)
     return json({ error: 'budget', reason: proj.reason }, 429)
   }
+  // Durable, cross-instance transactional reservation (Supabase) — intersects with the in-memory ledgers.
+  const durable = await reserveDurable(id.userId, 'assemblyai_tts', chars)
+  if (durable && !durable.ok) {
+    ledgerFor(id.userId).releaseTts(user.id)
+    projectLedger().releaseTts(proj.id)
+    return json({ error: 'budget', reason: durable.reason }, 429)
+  }
+  const durableId = durable?.ok ? durable.id : undefined
+  const t0 = Date.now()
 
   try {
     const r = await synthesizeApproved({
@@ -49,8 +62,11 @@ export async function POST(req: Request) {
     })
     ledgerFor(id.userId).commitTts(user.id, r.billedChars)
     projectLedger().commitTts(proj.id, r.billedChars)
+    const billed = r.billedChars ?? chars
+    await settleDurable(durableId, true, billed, billed * PRICES.ttsPerChar)
     // Content-free usage log (no text).
-    console.log(JSON.stringify({ evt: 'tts', attempt: approval.playbackAttemptId, chars, billed: r.billedChars, req: r.headers.get('x-request-id') }))
+    logEvent({ evt: 'tts', attempt: approval.playbackAttemptId, chars, billed: r.billedChars, req: r.headers.get('x-request-id'), ms: Date.now() - t0 })
+    void recordUsage({ userId: id.userId, provider: 'assemblyai', kind: 'tts_http', units: billed, estUsd: billed * PRICES.ttsPerChar, requestId: r.headers.get('x-request-id'), durationMs: Date.now() - t0 })
     return new Response(r.body, {
       headers: {
         'content-type': 'audio/pcm',
@@ -64,6 +80,8 @@ export async function POST(req: Request) {
     // Errors before first audio are not billed by AssemblyAI → refund reservations.
     ledgerFor(id.userId).releaseTts(user.id)
     projectLedger().releaseTts(proj.id)
+    await settleDurable(durableId, false)
+    void recordUsage({ userId: id.userId, provider: 'assemblyai', kind: 'tts_http', errorCategory: e instanceof AssemblyError ? e.code : (e as Error).name })
     if (e instanceof AssemblyError) {
       return json({ error: e.code, retryable: e.retryable }, e.status === 402 ? 402 : e.status >= 500 ? 502 : e.status, e.retryAfter ? { 'retry-after': String(e.retryAfter) } : {})
     }
