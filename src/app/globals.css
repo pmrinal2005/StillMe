@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+:root {
+  --target: 3.25rem;          /* adjustable minimum target size */
+  --text-scale: 1;
+  --bg: #0b1020;
+  --panel: #131a2e;
+  --panel-2: #1b2440;
+  --fg: #eef2ff;
+  --muted: #a5b0d0;
+  --accent: #7dd3fc;
+  --ok: #86efac;
+  --warn: #fcd34d;
+  --danger: #f87171;
+  --focus: #facc15;
+}
+html[data-contrast="high"] {
+  --bg: #000;
+  --panel: #000;
+  --panel-2: #111;
+  --fg: #fff;
+  --muted: #e5e5e5;
+  --accent: #00e5ff;
+  --focus: #ffff00;
+}
+html { font-size: calc(16px * var(--text-scale)); }
+body { background: var(--bg); color: var(--fg); }
+
+.rv-panel { background: var(--panel); border: 1px solid #2a3558; border-radius: 1rem; }
+html[data-contrast="high"] .rv-panel { border: 2px solid #fff; }
+.rv-muted { color: var(--muted); }
+
+.rv-btn {
+  min-height: var(--target);
+  min-width: var(--target);
+  padding: 0.5rem 1rem;
+  border-radius: 0.75rem;
+  font-weight: 600;
+  background: var(--panel-2);
+  border: 2px solid #33406a;
+  color: var(--fg);
+  display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+  transition: background .15s ease;
+}
+.rv-btn:hover { background: #26325a; }
+.rv-btn:disabled { opacity: .45; cursor: not-allowed; }
+.rv-btn-primary { background: #0e7490; border-color: #22d3ee; }
+.rv-btn-primary:hover { background: #0f87a8; }
+.rv-btn-danger { background: #991b1b; border-color: #f87171; }
+.rv-btn-danger:hover { background: #b91c1c; }
+.rv-btn[aria-pressed="true"] { outline: 2px solid var(--accent); }
+
+:focus-visible, .rv-scan-focus {
+  outline: 4px solid var(--focus) !important;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 8px rgba(250, 204, 21, .25);
+}
+
+.rv-input {
+  background: #0a0f1e; color: var(--fg); border: 2px solid #33406a; border-radius: .75rem; padding: .6rem .8rem;
+  min-height: var(--target);
+}
+html[data-contrast="high"] .rv-input { background: #000; border-color: #fff; }
+
+.rv-badge { display: inline-flex; align-items: center; gap: .35rem; padding: .15rem .55rem; border-radius: 999px; font-size: .8rem; font-weight: 600; border: 1px solid #3b4a7a; }
+.rv-dot { width: .55rem; height: .55rem; border-radius: 999px; display: inline-block; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+html[data-motion="reduced"] * { transition: none !important; animation: none !important; }
+
+.sr-only-focusable:not(:focus) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
