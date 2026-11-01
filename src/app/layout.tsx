@@ -15,7 +15,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="min-h-screen antialiased">
-        <a href="#composer-input" className="sr-only-focusable rv-btn absolute left-2 top-2 z-50">Skip to message composer</a>
+        <nav aria-label="Skip links">
+          <a href="#composer-input" className="sr-only-focusable rv-btn absolute left-2 top-2 z-50">Skip to message composer</a>
+        </nav>
         {children}
         <ServiceWorker />
       </body>

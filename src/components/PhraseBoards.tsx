@@ -63,7 +63,7 @@ export function PhraseBoards({ onPick, cacheAllowed = false }: { onPick: (text: 
       </div>
       <div role="tablist" aria-label="Boards" className="mb-3 flex flex-wrap gap-2">
         {boards.map((b) => (
-          <button key={b.id} role="tab" aria-selected={active === b.id} data-scan className="rv-btn text-sm" aria-pressed={active === b.id} onClick={() => setActive(b.id)}>
+          <button key={b.id} role="tab" aria-selected={active === b.id} data-scan className="rv-btn text-sm" onClick={() => setActive(b.id)}>
             {b.name}
           </button>
         ))}

@@ -733,7 +733,7 @@ export function ReVoiceApp() {
       {/* ------------------------------------------------ secondary panels */}
       <nav aria-label="Panels" className="flex flex-wrap gap-2" role="tablist">
         {([['session', 'Listening'], ['voice', 'Voice'], ['settings', 'Settings'], ['bank', 'Message bank'], ['privacy', 'Privacy'], ['metrics', 'Measurements']] as [Tab, string][]).map(([k, label]) => (
-          <button key={k} role="tab" aria-selected={tab === k} aria-controls={`panel-${k}`} className="rv-btn" aria-pressed={tab === k} onClick={() => setTab(k)}>{label}</button>
+          <button key={k} role="tab" aria-selected={tab === k} aria-controls={`panel-${k}`} className="rv-btn" onClick={() => setTab(k)}>{label}</button>
         ))}
       </nav>
       <div id={`panel-${tab}`} role="tabpanel">

@@ -48,7 +48,8 @@ html[data-contrast="high"] .rv-panel { border: 2px solid #fff; }
 .rv-btn-primary:hover { background: #0f87a8; }
 .rv-btn-danger { background: #991b1b; border-color: #f87171; }
 .rv-btn-danger:hover { background: #b91c1c; }
-.rv-btn[aria-pressed="true"] { outline: 2px solid var(--accent); }
+.rv-btn[aria-pressed="true"],
+.rv-btn[aria-selected="true"] { outline: 2px solid var(--accent); }
 
 :focus-visible, .rv-scan-focus {
   outline: 4px solid var(--focus) !important;
