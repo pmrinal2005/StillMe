@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { db, ensureSeed, uid, type Board, type Phrase } from '@/lib/client/db'
 
 /** Local phrase boards: work offline and without any AI. Selecting a phrase loads it into the composer for review. */
-export function PhraseBoards({ onPick }: { onPick: (text: string) => void }) {
+export function PhraseBoards({ onPick, cacheAllowed = false }: { onPick: (text: string, opts: { cacheable: boolean }) => void; cacheAllowed?: boolean }) {
   const [boards, setBoards] = useState<Board[]>([])
   const [phrases, setPhrases] = useState<Phrase[]>([])
   const [active, setActive] = useState<string>('')
@@ -46,7 +46,11 @@ export function PhraseBoards({ onPick }: { onPick: (text: string) => void }) {
   }
   const pick = async (p: Phrase) => {
     await db.phrases.update(p.id, { uses: p.uses + 1 })
-    onPick(p.text)
+    onPick(p.text, { cacheable: !!p.cacheable })
+  }
+  const toggleCache = async (p: Phrase) => {
+    await db.phrases.update(p.id, { cacheable: !p.cacheable })
+    setPhrases(await db.phrases.where('boardId').equals(active).sortBy('order'))
   }
 
   return (
@@ -71,6 +75,11 @@ export function PhraseBoards({ onPick }: { onPick: (text: string) => void }) {
               {p.text}
             </button>
             {editing && (
+              <button className="rv-btn text-sm" aria-pressed={!!p.cacheable} title="Allow saving the synthesized audio on this device (library voices only; never cloned voices)" onClick={() => toggleCache(p)}>
+                {p.cacheable ? 'Cached ✓' : 'Cache'}
+              </button>
+            )}
+            {editing && (
               <button className="rv-btn rv-btn-danger" aria-label={`Delete phrase: ${p.text}`} onClick={() => removePhrase(p.id)}>
                 ✕
               </button>
@@ -78,6 +87,9 @@ export function PhraseBoards({ onPick }: { onPick: (text: string) => void }) {
           </li>
         ))}
       </ul>
+      {editing && (
+        <p className="rv-muted mt-2 text-xs">“Cache” stores the spoken audio of that phrase on this device for instant, offline-capable replay{cacheAllowed ? '' : ' (only with library voices — cloned-voice audio is never cached)'}.</p>
+      )}
       {editing && (
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           <label className="flex gap-2">

@@ -22,6 +22,12 @@ export interface Prefs {
   aiSuggestions: boolean
   /** Explicit opt-in to use the device/system voice when the cloud voice is unavailable. */
   deviceVoiceFallback: boolean
+  /** "Hold My Turn" phrase — shown verbatim on the button; pressing it approves exactly this text. */
+  holdTurnPhrase: string
+  /** Partner session mode preference. */
+  sessionMode: 'tabletop' | 'partner-link' | 'remote'
+  /** Optional user-selected third intent for the Intent Compass. */
+  preferredIntent: string
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -40,6 +46,9 @@ export const DEFAULT_PREFS: Prefs = {
   styleCard: '',
   aiSuggestions: true,
   deviceVoiceFallback: true,
+  holdTurnPhrase: 'I have something to add.',
+  sessionMode: 'tabletop',
+  preferredIntent: '',
 }
 
 /** Preferences live on-device (IndexedDB). If signed in to Supabase, accessibility + style sync via RLS. */

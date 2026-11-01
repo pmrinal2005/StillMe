@@ -26,7 +26,7 @@ const dec = new TextDecoder()
 export class LiveKitListener {
   room: Room | null = null
   private micPub: LocalTrackPublication | undefined
-  constructor(private ev: ListenerEvents, private opts: { url: string; token: string; publishMic: boolean; workerIdentityPrefix?: string }) {}
+  constructor(private ev: ListenerEvents, private opts: { url: string; token: string; publishMic: boolean; playPartnerAudio?: boolean; workerIdentityPrefix?: string }) {}
 
   async start() {
     this.ev.onStatus({ state: 'connecting' })
@@ -50,9 +50,10 @@ export class LiveKitListener {
           }
         } catch {}
       })
-      .on(RoomEvent.TrackSubscribed, (track) => {
+      .on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
         // Worker publishes approved synthetic speech as an audio track: attach for local playback.
-        if (track.kind === Track.Kind.Audio) {
+        // Partner microphone audio is only played in remote-call mode (never in tabletop/partner-link: echo).
+        if (track.kind === Track.Kind.Audio && (participant.isAgent || this.opts.playPartnerAudio)) {
           const el = track.attach()
           el.dataset.revoice = 'agent-audio'
           document.body.appendChild(el)

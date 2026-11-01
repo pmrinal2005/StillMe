@@ -49,9 +49,9 @@ export const api = {
       }),
     }),
   suggest: (req: SuggestRequest, signal?: AbortSignal) => call<{ set: CandidateSet }>('/api/suggest', { method: 'POST', body: JSON.stringify(req), signal }),
-  startSession: (b: { mode: string; voiceId: string; outputLanguage: string; inputLanguages: string[]; keyterms: string[]; minutes?: number }) =>
+  startSession: (b: { mode: string; voiceId: string; outputLanguage: string; inputLanguages: string[]; keyterms: string[]; contextPrompt?: string; minutes?: number; replace?: boolean }) =>
     call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; maxSessionMinutes: number }>('/api/livekit/session', { method: 'POST', body: JSON.stringify(b) }),
-  endSession: (room: string) => call<{ ok: true }>('/api/livekit/end', { method: 'POST', body: JSON.stringify({ room }) }),
+  endSession: (room: string, reason: 'user' | 'timeout' | 'budget' | 'idle' | 'error' = 'user') => call<{ ok: true }>('/api/livekit/end', { method: 'POST', body: JSON.stringify({ room, reason }) }),
   join: (invite: string, label: string) => call<{ url: string; token: string; identity: string; room: string }>('/api/livekit/join', { method: 'POST', body: JSON.stringify({ invite, label, consent: true }) }),
   sttToken: (b: { sampleRate: number; languageCodes: string[]; keyterms: string[]; minutes: number }) =>
     call<{ wsUrl: string; maxSessionSeconds: number }>('/api/stt-token', { method: 'POST', body: JSON.stringify(b) }),
@@ -85,6 +85,7 @@ export interface StatusResponse {
   budget: {
     user: BudgetSnap
     project: BudgetSnap
+    limits?: { assembly: { interactiveSessionMinutes: number; dailyTtsChars: number }; livekit: { monthlyInboundPhoneMinutes: number } }
   }
 }
 export interface BudgetSnap {
