@@ -202,7 +202,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
               {OUTPUT_LANGUAGES.map((l) => <option key={l} value={l}>{OUTPUT_LANGUAGE_LABELS[l]}</option>)}
             </select>
           </label>
-          <div className="flex gap-2"><button className="rv-btn" onClick={() => setStep(1)}>Back</button><button className="rv-btn rv-btn-primary" onClick={() => setStep(3)}>Next</button></div>
+          <div className="flex flex-wrap gap-2"><button className="rv-btn" onClick={() => setStep(1)}>Back</button><button className="rv-btn rv-btn-primary" onClick={() => setStep(3)}>Next</button></div>
         </div>
       )}
       {step === 3 && (
@@ -211,7 +211,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
           <label className="flex gap-2"><input type="checkbox" checked={f.rightsConfirmed} onChange={(e) => set({ rightsConfirmed: e.target.checked })} /> We have the rights to use this recording for this purpose.</label>
           <label className="flex gap-2"><input type="checkbox" checked={f.biometricTermsAccepted} onChange={(e) => set({ biometricTermsAccepted: e.target.checked })} /> The applicable AssemblyAI biometric terms were accepted. Consent lasts {CONSENT_PERIOD_DAYS} days unless affirmatively renewed.</label>
           <p className="rv-muted">Consent to cloning is separate from consent to processing a conversation, saving a recap, or sharing content.</p>
-          <div className="flex gap-2"><button className="rv-btn" onClick={() => setStep(2)}>Back</button><button className="rv-btn rv-btn-primary" onClick={() => setStep(4)}>Next</button></div>
+          <div className="flex flex-wrap gap-2"><button className="rv-btn" onClick={() => setStep(2)}>Back</button><button className="rv-btn rv-btn-primary" onClick={() => setStep(4)}>Next</button></div>
         </div>
       )}
       {step === 4 && (
@@ -226,7 +226,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
           </label>
           <label className="flex gap-2"><input type="checkbox" checked={f.qualityChecked} onChange={(e) => set({ qualityChecked: e.target.checked })} /> The owner listened to a sample in the dashboard and approves its quality.</label>
           {err && <p role="alert" className="rv-text-danger">{err}</p>}
-          <div className="flex gap-2"><button className="rv-btn" onClick={() => setStep(3)}>Back</button><button className="rv-btn rv-btn-primary" onClick={save}>Register voice</button></div>
+          <div className="flex flex-wrap gap-2"><button className="rv-btn" onClick={() => setStep(3)}>Back</button><button className="rv-btn rv-btn-primary" onClick={save}>Register voice</button></div>
         </div>
       )}
     </div>

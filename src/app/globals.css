@@ -264,8 +264,8 @@ html[data-contrast="high"] .rv-iris > .rv-iris-inner { background: #000; }
 
 .rv-composer-text {
   width: 100%; resize: vertical; background: transparent; border: 0; color: var(--fg);
-  font-size: 1.55rem; line-height: 1.35; font-weight: 500; letter-spacing: -0.01em;
-  padding: 1.1rem 1.25rem 0.5rem; min-height: 7.5rem;
+  font-size: clamp(1.2rem, 0.95rem + 1.6vw, 1.55rem); line-height: 1.35; font-weight: 500; letter-spacing: -0.01em;
+  padding: clamp(0.8rem, 2.5vw, 1.1rem) clamp(0.9rem, 3vw, 1.25rem) 0.5rem; min-height: clamp(5.5rem, 18vw, 7.5rem);
 }
 .rv-composer-text::placeholder { color: #8a84a0; }
 .rv-composer-text:focus { outline: none; }
@@ -414,10 +414,6 @@ html[data-contrast="high"] .rv-orb-ring { border-color: #ffd400; }
 .rv-rail-btn:hover .rv-tip, .rv-rail-btn:focus-visible .rv-tip { opacity: 1; transform: translate(0, -50%); }
 html[data-contrast="high"] .rv-rail-btn { color: #fff; border: 2px solid #fff; }
 html[data-contrast="high"] .rv-rail-btn[aria-current="page"] { background: #fff; color: #000; }
-@media (max-width: 1023px) {
-  .rv-rail { flex-direction: row; overflow-x: auto; justify-content: flex-start; padding: 0.45rem; border-radius: 1.25rem; }
-  .rv-rail-btn .rv-tip { display: none; }
-}
 
 .rv-logo {
   width: 2.6rem; height: 2.6rem; border-radius: 0.95rem; display: grid; place-items: center; flex: none;
@@ -427,7 +423,7 @@ html[data-contrast="high"] .rv-rail-btn[aria-current="page"] { background: #fff;
 
 /* ---------------------------------------------------------------- caption bubbles */
 .rv-bubble {
-  max-width: 46rem; padding: 0.7rem 1rem; border-radius: 1.2rem 1.2rem 1.2rem 0.4rem;
+  max-width: min(46rem, 100%); padding: 0.7rem 1rem; border-radius: 1.2rem 1.2rem 1.2rem 0.4rem;
   background: rgba(255,255,255,0.85); border: 1px solid rgba(90, 70, 140, 0.12); box-shadow: var(--shadow-sm);
   font-size: 1.15rem; line-height: 1.45;
 }
@@ -510,6 +506,171 @@ html[data-contrast="high"] .rv-overlay { background: #000; }
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
 html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-motion="reduced"] *::after { transition: none !important; animation: none !important; }
+
+/* =====================================================================================
+   Responsive layer — phones (320px+), foldables, tablets (portrait/landscape), laptops,
+   ultra-wide; short landscape phones; notches/home-indicator safe areas; touch vs mouse.
+   The Stop control stays on-screen at every size (it is the safety exit), and every target
+   keeps --target minimum size. Logic is unchanged: this layer is presentation only.
+   ===================================================================================== */
+html, body { overflow-x: clip; }
+body { min-height: 100dvh; }
+.rv-shell { min-height: 100dvh; }
+
+/* the dock height is reserved at the bottom of the page so Stop never hides the last content */
+:root {
+  --stop-h: calc(var(--target) * 1.3);
+  --dock-pad: 0.75rem;
+  --dock-reserve: calc(var(--stop-h) + var(--dock-pad) * 2 + 1.25rem + env(safe-area-inset-bottom, 0px));
+}
+.rv-layout {
+  padding: max(0.75rem, env(safe-area-inset-top, 0px)) max(0.75rem, env(safe-area-inset-right, 0px)) var(--dock-reserve) max(0.75rem, env(safe-area-inset-left, 0px));
+}
+@media (min-width: 640px) {
+  .rv-layout { padding-left: max(1.25rem, env(safe-area-inset-left, 0px)); padding-right: max(1.25rem, env(safe-area-inset-right, 0px)); padding-top: max(1.25rem, env(safe-area-inset-top, 0px)); }
+}
+
+/* ---------------------------------------------------------------- Stop dock */
+.rv-stop-dock {
+  padding: 1.25rem max(var(--dock-pad), env(safe-area-inset-right, 0px)) calc(var(--dock-pad) + env(safe-area-inset-bottom, 0px)) max(var(--dock-pad), env(safe-area-inset-left, 0px));
+  pointer-events: none; /* the fade never blocks taps; only the button is interactive */
+}
+.rv-stop-dock > * { pointer-events: auto; }
+.rv-stop { min-height: var(--stop-h); font-size: clamp(1.05rem, 0.9rem + 0.8vw, 1.25rem); white-space: nowrap; overflow: hidden; }
+.rv-stop .truncate { min-width: 0; }
+
+/* ---------------------------------------------------------------- rail → labelled tab bar below lg */
+.rv-rail-label { display: none; }
+@media (max-width: 1023px) {
+  .rv-rail-wrap {
+    position: sticky; top: max(0.5rem, env(safe-area-inset-top, 0px)); z-index: 30;
+  }
+  .rv-rail {
+    flex-direction: row; align-items: center; justify-content: flex-start; gap: 0.35rem;
+    padding: 0.35rem; border-radius: 1.25rem;
+    overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    background: var(--glass-strong);
+  }
+  .rv-rail::-webkit-scrollbar { display: none; }
+  .rv-rail-items { flex: none; }
+  .rv-rail-btn {
+    width: auto; height: auto; min-width: 3.6rem; min-height: var(--target);
+    padding: 0.3rem 0.55rem; gap: 0.1rem; border-radius: 0.95rem;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    scroll-snap-align: start; flex: none;
+  }
+  .rv-rail-label { display: block; font-size: 0.68rem; font-weight: 700; line-height: 1.1; letter-spacing: 0.01em; white-space: nowrap; }
+  .rv-rail-btn .rv-tip { display: none; }
+  .rv-rail-btn:hover { transform: none; }
+}
+@media (min-width: 640px) and (max-width: 1023px) {
+  /* tablets: the tab bar has room to spread evenly */
+  .rv-rail-items { flex: 1; justify-content: space-around; }
+  .rv-rail-btn { min-width: 4.4rem; }
+  .rv-rail-label { font-size: 0.74rem; }
+}
+@media (max-width: 419px) {
+  .rv-rail-logo { display: none; }
+  .rv-rail-btn { min-width: 3.25rem; padding: 0.3rem 0.4rem; }
+}
+
+/* ---------------------------------------------------------------- hero */
+@media (max-width: 639px) {
+  .rv-hero-title { font-size: clamp(1.55rem, 7.2vw, 2rem); }
+  .rv-hero-orb .rv-orb-wrap, .rv-hero-orb .rv-orb { --size: 112px !important; }
+  .rv-hero.is-compact .rv-hero-orb .rv-orb-wrap, .rv-hero.is-compact .rv-hero-orb .rv-orb { --size: 64px !important; }
+}
+@media (min-width: 1536px) {
+  .rv-hero:not(.is-compact) .rv-hero-orb .rv-orb-wrap, .rv-hero:not(.is-compact) .rv-hero-orb .rv-orb { --size: 176px !important; }
+}
+
+/* ---------------------------------------------------------------- quick chips */
+.rv-chip { max-width: 100%; }
+.rv-chip-quote { max-width: min(100%, 22rem); overflow: hidden; }
+.rv-chip .truncate { min-width: 0; }
+@media (max-width: 479px) {
+  .rv-quick { display: grid; grid-template-columns: 1fr 1fr; }
+  .rv-quick > .rv-chip { justify-content: center; width: 100%; }
+  .rv-quick > .rv-chip-quote:first-of-type { max-width: none; }
+}
+@media (max-width: 339px) {
+  .rv-quick { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------- badges wrap instead of overflowing */
+.rv-badge { max-width: 100%; }
+.rv-badge-wrap { white-space: normal; align-items: flex-start; border-radius: 1rem; }
+
+/* ---------------------------------------------------------------- composer action bar */
+.rv-composer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0 0.75rem 0.75rem; }
+.rv-composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; flex: 1 1 auto; min-width: 0; }
+.rv-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+@media (max-width: 639px) {
+  .rv-composer-tools { width: 100%; }
+  .rv-composer-actions { width: 100%; margin-left: 0; }
+  .rv-composer-actions > .rv-btn { flex: 1 1 auto; }
+  .rv-speak { flex: 2 1 10rem !important; min-height: calc(var(--target) * 1.1); }
+}
+
+/* ---------------------------------------------------------------- panels on phones */
+@media (max-width: 639px) {
+  .rv-section-title { font-size: 1rem; }
+  .rv-table { font-size: 0.8rem; }
+  .rv-table th, .rv-table td { padding: 0.4rem 0.35rem; }
+  .rv-sugg { padding: 0.85rem; }
+  .rv-canvas { border-radius: 1.5rem; }
+}
+
+/* ---------------------------------------------------------------- touch devices */
+@media (hover: none) {
+  .rv-btn:hover:not(:disabled), .rv-chip:hover:not(:disabled), .rv-tile:hover, .rv-sugg:hover, .rv-mode:hover, .rv-rail-btn:hover { transform: none; }
+  .rv-kbd-hint { display: none; }
+}
+@media (pointer: coarse) {
+  :root { --target: max(3.25rem, 48px); }
+  input, select, textarea { font-size: max(16px, 1rem); } /* stops iOS zooming into focused fields */
+}
+
+/* ---------------------------------------------------------------- short screens (landscape phones, split view) */
+@media (max-height: 540px) and (orientation: landscape) {
+  :root { --stop-h: var(--target); --dock-pad: 0.45rem; }
+  .rv-stop-dock { padding-top: 0.6rem; }
+  .rv-stop { font-size: 1rem; }
+  .rv-hero-lede { display: none !important; }
+  .rv-hero-title { font-size: clamp(1.3rem, 3.4vw, 1.8rem); }
+  .rv-hero-orb .rv-orb-wrap, .rv-hero-orb .rv-orb { --size: 72px !important; }
+  .rv-orb-reflection { display: none; }
+  .rv-hero { margin-top: 0.75rem !important; }
+  .rv-rail-label { display: none; }
+  .rv-rail-btn { min-width: var(--target); }
+  .rv-composer-text { min-height: 4.5rem; }
+  .rv-rail-wrap { position: static; }
+}
+@media (max-height: 540px) and (min-width: 1024px) {
+  .rv-rail-wrap { position: static; height: auto; }
+}
+
+/* ---------------------------------------------------------------- partner join page */
+.rv-join {
+  padding: max(1rem, env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right, 0px)) max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 1rem)) max(1rem, env(safe-area-inset-left, 0px));
+}
+@media (max-width: 639px) {
+  .rv-join .rv-orb-wrap, .rv-join .rv-orb { --size: 108px !important; }
+}
+@media (max-height: 540px) and (orientation: landscape) {
+  .rv-join .rv-orb-wrap, .rv-join .rv-orb { --size: 72px !important; }
+}
+
+/* large-text overlay keeps its close button reachable on short screens */
+.rv-overlay { padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px)); }
+@media (max-height: 540px) { .rv-overlay-orb { display: none; } }
+
+/* print: plain, readable message only */
+@media print {
+  .rv-backdrop, .rv-rail-wrap, .rv-stop-dock { display: none !important; }
+  .rv-canvas, .rv-glass { box-shadow: none !important; backdrop-filter: none !important; background: #fff !important; }
+}
 
 .sr-only-focusable:not(:focus) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .rv-scroll-x { scrollbar-width: none; } .rv-scroll-x::-webkit-scrollbar { display: none; }

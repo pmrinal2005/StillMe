@@ -28,6 +28,7 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 | Build-time secret scan (fails the build on a leak) | ✅ |
 | axe-core WCAG 2.1 AA + best-practice: home, join, dark/reduced-motion, mobile | ✅ 0 violations |
 | **Frontend rebuilt (v2 "iridescent glass")**: side rail, animated liquid orb that mirrors listening/drafting/speaking/holding states, quick-action chips, iridescent composer, glass suggestion cards with shimmer while drafting, caption bubbles, tile phrase boards, glass partner join page | ✅ logic unchanged; axe 0 violations on 11 page/mode/viewport cases |
+| **Device responsiveness (v2.1)**: labelled sticky tab bar on phones/tablets, fluid type, 2-column quick actions, stacked composer actions, short-landscape mode, safe-area insets (notch/home bar), coarse-pointer 48 px targets, no iOS input zoom, on-screen-keyboard aware viewport | ✅ 0 horizontal overflow, 0 small targets on 9 viewports × 6 panels + join; axe 0 violations on 10 viewport cases |
 | `vercel.json` for Vercel deployment | ✅ |
 | Live provider smoke test (real AssemblyAI/Groq/LiveKit calls) | ⏳ needs your keys; capped at $2 |
 | Usability sessions with consenting non-clinical volunteers | ⏳ not started |
@@ -108,6 +109,19 @@ pytest -q                         # 37 tests, no network
 - High contrast (`data-contrast="high"`) swaps all glass for solid black and white with yellow focus. Reduced motion (OS setting or app setting) stops all animation.
 - The `--target` and `--text-scale` settings still control every button, chip, tile and rail button.
 
+### Device responsiveness (v2.1)
+Presentation-only changes; no app logic changed. Tested in Chromium at 320×568 (iPhone SE), 390×844, 430×932, 844×390 (landscape phone), 600×900 (foldable), 768×1024 / 1024×768 (iPad), 1280×800 and 1920×1080, across every panel and the partner join page.
+- **Navigation:** on desktop (≥1024 px) the vertical glass rail stays. Below that, it becomes a sticky, horizontally scrollable tab bar with **visible text labels** (Converse, Voice, Settings, Bank, Privacy, Metrics, Large). On tablets the labels spread evenly. Accessible names contain the visible label (WCAG 2.5.3).
+- **Stop:** always fixed at the bottom and on-screen at every size. It respects `env(safe-area-inset-bottom)`, and the page reserves its height (`--dock-reserve`) so it never covers the last content. The fade above it has `pointer-events: none`, so it never swallows taps.
+- **Hero:** fluid title; the orb shrinks to 112 px on phones, 64 px in compact panels and 72 px on short landscape screens; the lede is hidden on short screens.
+- **Quick actions:** a 2-column grid under 480 px and 1 column under 340 px. Long phrases and voice names truncate instead of overflowing.
+- **Composer:** fluid text size and height. Under 640 px, tools (Clear / Large text / counter) sit on one row and **Speak** gets a full-width, taller button. Keyboard hints are hidden on touch-only devices.
+- **Suggestions:** one column until 1100 px (three cramped cards on a tablet are hard to read), three above that. Feedback buttons wrap.
+- **Touch:** `@media (pointer: coarse)` raises `--target` to at least 48 px; hover lift is disabled on `hover: none`; inputs are ≥16 px so iOS Safari doesn't zoom on focus.
+- **Viewport:** `viewport-fit=cover` (safe areas), `interactive-widget=resizes-content` (the on-screen keyboard shrinks the layout, so the composer stays visible), `100dvh` instead of `100vh` (mobile URL bars). Pinch-zoom is never disabled.
+- **Short landscape (≤540 px tall):** compact Stop, no rail labels, static rail, smaller orb, shorter composer.
+- **Print:** prints only the content (no backdrop, rail or Stop).
+
 ### Vercel
 `vercel.json` pins the framework (`nextjs`), `npm ci`, `npm run build` (so the secret scan runs on every deploy), the `iad1` region, a 60 s max duration for API routes (within the Hobby limit), `no-store` on `/api/*`, and correct headers for `sw.js` and the manifest. Import the GitHub repo in Vercel, add the env vars from `.env.example` in Project Settings → Environment Variables, and deploy. The Python worker does **not** run on Vercel; it runs on LiveKit Cloud.
 
@@ -167,4 +181,82 @@ pytest -q                         # 37 tests, no network
 3. Playwright end-to-end tests in CI (axe is already clean) and screen-reader passes on iOS and Android.
 4. Symbol-supported and simplified-language views after individual testing.
 
-_Last updated: 2026-11-01 (frontend v2 rebuild, vercel.json)._
+## 11. Manual setup — every step you must do yourself (accounts, keys, deploy)
+
+None of these can be done from code. Do them in order. Without any keys the app still runs as a typed AAC tool (phrase boards, large text, device voice). Each key below turns on one more capability.
+
+### Step 0 — Prerequisites
+1. Install Node.js 20 or later and Python 3.11 or later.
+2. Unzip the project, then in its folder run `npm ci`.
+3. Copy `.env.example` to `.env.local` (web app) and `worker/.env.example` to `worker/.env` (worker). Never commit these files; `.gitignore` already excludes them.
+
+### Step 1 — Approval secret (required for production)
+1. Generate a random secret: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+2. Put the same value in `REVOICE_APPROVAL_SECRET` in both `.env.local` and `worker/.env`, and later in Vercel and LiveKit. The web app and worker must match exactly.
+3. In production, also set `REVOICE_REQUIRE_SECRET=true` in Vercel.
+
+### Step 2 — Supabase (sign-in and minimal database), free
+1. Sign up at https://supabase.com, then choose **New project**. Pick a region and set a database password.
+2. Go to **Project Settings → API** and copy:
+   - Project URL → `NEXT_PUBLIC_SUPABASE_URL`
+   - `anon` public key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `service_role` key → `SUPABASE_SERVICE_ROLE_KEY` (**server only**; never put it in a `NEXT_PUBLIC_` variable)
+3. Open **SQL Editor**, then paste and run `supabase/migrations/0001_init.sql`, then `0002_phone_reconcile.sql`.
+4. Set up OAuth sign-in. Default email sign-in is limited to 2 emails per hour, so don't rely on it.
+   - **GitHub:** at https://github.com/settings/developers choose **New OAuth App**. Set Homepage URL to your site URL, and the callback URL to `https://<your-project-ref>.supabase.co/auth/v1/callback`. Copy the Client ID and Secret into Supabase **Authentication → Providers → GitHub** and enable it.
+   - **Google (optional):** in Google Cloud Console go to **APIs & Services → Credentials → Create OAuth client ID** (Web). Use the same Supabase callback URL as the authorized redirect URI. Paste the ID and secret into Supabase **Providers → Google**.
+5. In Supabase **Authentication → URL Configuration**, set Site URL to your Vercel URL. Add `http://localhost:3000` and your Vercel URL to Redirect URLs.
+6. Note: free projects pause after 7 idle days. Restore them from the dashboard.
+
+### Step 3 — AssemblyAI (speech-to-text and text-to-speech), BYOK
+1. Sign up at https://www.assemblyai.com/dashboard, then open **API Keys** and copy the key into `ASSEMBLYAI_API_KEY` (web and worker).
+2. In **Billing**, check your credit balance and **turn off auto-refill**. The app's $1/day cap and $15 reserve are app-level limits only.
+3. Confirm your account has TTS access (`assemblyai-tts-1`) and streaming STT (`universal-3-6-pro`).
+4. Choose your data zone and set `ASSEMBLYAI_REGION=us` or `eu` in both places. Cloned voices only work in the zone where they were created.
+5. Cloned voices (optional): create them **only in the AssemblyAI dashboard**, with the speaker's documented consent, using 10–30 s of clear single-speaker WAV. Then register the voice ID in the app under **Voice wardrobe → Add a cloned voice**. Consent expires after 60 days and must be renewed in the app.
+
+### Step 4 — Groq (the three suggested replies), free tier
+1. Sign up at https://console.groq.com, then open **API Keys → Create API Key** and copy it into `GROQ_API_KEY`.
+2. Keep `GROQ_MODEL=openai/gpt-oss-20b`, and check that the model appears under **Models** for your account.
+3. In **Settings → Data controls**, enable **Zero Data Retention** if it's available.
+4. Check your account's rate limits under **Settings → Limits**. The app's own caps are 200 requests/day, 6/min and 100k tokens/day.
+
+### Step 5 — LiveKit Cloud (realtime audio and the Python worker), Build plan
+1. Sign up at https://cloud.livekit.io and create a project.
+2. In **Settings → Keys**, create a key and copy:
+   - WebSocket URL (`wss://<project>.livekit.cloud`) → `LIVEKIT_URL`
+   - API key → `LIVEKIT_API_KEY`
+   - API secret → `LIVEKIT_API_SECRET`
+   Put all three in both `.env.local` and `worker/.env`.
+3. Keep `LIVEKIT_AGENT_NAME=revoice-worker` in the worker env. The web app dispatches the worker by this name.
+4. Deploy the worker:
+   1. Install the LiveKit CLI (https://docs.livekit.io/home/cli/).
+   2. Run `lk cloud auth`.
+   3. Run `cd worker && lk agent create`. This builds `worker/Dockerfile` on LiveKit Cloud.
+   4. Add the `worker/.env` values as agent **secrets**: `ASSEMBLYAI_API_KEY`, `ASSEMBLYAI_REGION`, `LIVEKIT_*`, `REVOICE_APPROVAL_SECRET` and `REVOICE_APP_URL` (your Vercel URL). Use the dashboard or `lk agent update-secrets`.
+   5. Redeploy later with `lk agent deploy`.
+5. To test the worker locally instead: `cd worker && python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && python -m revoice_worker.main dev`.
+6. Phone bridge (optional, off by default): only if a US inbound number costs nothing new on your plan. Set `REVOICE_PHONE_INBOUND_ENABLED=true` in the worker and set up a LiveKit SIP inbound trunk and dispatch rule in the dashboard. It's capped at 40 min/month and 15 min/call. Not an emergency service.
+
+### Step 6 — Run locally
+1. Run `npm run build`. The build fails if any secret leaks into browser files.
+2. Start it with `npm start` (or `pm2 start ecosystem.config.cjs`), then open http://localhost:3000.
+3. Run the tests: `npm test` (77 tests) and `cd worker && pytest -q` (37 tests).
+4. Microphone and audio need HTTPS or `localhost`. Test on a phone through your deployed Vercel URL.
+
+### Step 7 — Deploy the frontend to Vercel Hobby
+1. Push the project to a GitHub repo (for example, your `StillMe` repo).
+2. At https://vercel.com/new, import the repo. `vercel.json` already sets the framework, install/build commands, region, function duration and headers.
+3. In **Project Settings → Environment Variables**, add every variable from `.env.example` with real values, plus `REVOICE_REQUIRE_SECRET=true` and optionally `REVOICE_OPERATOR_IDS` (comma-separated Supabase user IDs allowed to record reconciliations). Only the two `NEXT_PUBLIC_SUPABASE_*` variables may have the public prefix.
+4. Deploy, then put the Vercel URL into:
+   - Supabase Site URL and Redirect URLs
+   - the GitHub/Google OAuth homepage
+   - the worker's `REVOICE_APP_URL` secret
+5. Keep `REVOICE_ALLOW_BROWSER_STT=false` in production. It's only for a trusted private demo.
+
+### Step 8 — First live check (budget at most $2)
+1. Sign in, type a sentence and press **Speak**. You should hear the AssemblyAI voice.
+2. Start a **Partner link** session, open the link on a second phone, give consent, and speak. Captions and three suggestions should appear. Nothing is spoken until you approve.
+3. Press **STOP** while it's speaking; audio must stop at once.
+4. Compare spend in the AssemblyAI, Groq and LiveKit dashboards with **Metrics & measurements → Reconciliation**.
+

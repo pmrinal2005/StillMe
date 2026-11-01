@@ -102,9 +102,9 @@ export default function JoinPage() {
 
   const orbState: OrbState = phase !== 'joined' ? 'idle' : voiceSpeaking ? 'speaking' : holdTurn ? 'holding' : composing ? 'drafting' : 'listening'
   return (
-    <div className="relative min-h-screen">
+    <div className="relative min-h-dvh">
       <Backdrop />
-      <main id="partner-join" className="mx-auto grid max-w-2xl gap-5 p-4 sm:p-8">
+      <main id="partner-join" className="rv-join mx-auto grid max-w-2xl gap-4 sm:gap-5 sm:p-8">
         <header className="rv-enter flex items-center gap-3">
           <Logo />
           <div>
@@ -112,13 +112,13 @@ export default function JoinPage() {
             <p className="rv-muted text-xs font-semibold">Partner view</p>
           </div>
         </header>
-        <div className="rv-enter rv-enter-d1 grid justify-items-center gap-6 py-4 text-center">
+        <div className="rv-enter rv-enter-d1 grid justify-items-center gap-4 py-2 text-center sm:gap-6 sm:py-4">
           <h1 className="rv-hero-title">Join a <span className="rv-gradient-text">ReVOICE</span> conversation</h1>
           <Orb state={orbState} size={phase === 'joined' ? 170 : 120} reflection={phase === 'joined'} />
         </div>
 
         {(phase === 'consent' || phase === 'error' || phase === 'joining') && (
-          <section aria-labelledby="disclosure-h" className="rv-canvas rv-enter rv-enter-d2 grid gap-4 p-5 sm:p-7">
+          <section aria-labelledby="disclosure-h" className="rv-canvas rv-enter rv-enter-d2 grid gap-4 p-4 sm:p-7">
             <h2 id="disclosure-h" className="rv-section-title">Before you join</h2>
             <ul className="grid gap-2 text-sm">
               {[
@@ -144,9 +144,9 @@ export default function JoinPage() {
         )}
 
         {phase === 'joined' && (
-          <section aria-labelledby="coach-h" className="rv-canvas rv-enter grid gap-5 p-6 text-center sm:p-8">
+          <section aria-labelledby="coach-h" className="rv-canvas rv-enter grid gap-5 p-4 text-center sm:p-8">
             <h2 id="coach-h" className="sr-only">Conversation status</h2>
-            <div aria-live="polite" className="flex items-center justify-center gap-3 text-2xl font-extrabold tracking-tight" style={{ minHeight: '4rem' }}>
+            <div aria-live="polite" className="flex flex-wrap items-center justify-center gap-3 text-xl font-extrabold tracking-tight sm:text-2xl" style={{ minHeight: '4rem' }}>
               {voiceSpeaking ? <><span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> They are speaking…</>
                 : holdTurn ? <><Icon name="hand" size={26} /> They have something to add — please pause.</>
                   : composing ? <><Icon name="edit" size={24} /> They are composing a reply…</>
@@ -157,7 +157,7 @@ export default function JoinPage() {
               <li className="rv-panel p-3"><strong className="block">One question at a time</strong><span className="rv-muted">Yes/no is fine, but they may choose another answer.</span></li>
               <li className="rv-panel p-3"><strong className="block">Corrections are OK</strong><span className="rv-muted">If you change your mind mid-sentence, their drafts update.</span></li>
             </ul>
-            <div className="flex justify-center gap-2">
+            <div className="flex flex-col justify-center gap-2 min-[400px]:flex-row">
               <button className="rv-btn" aria-pressed={muted} onClick={toggleMute}><Icon name="mic" size={16} /> {muted ? 'Unmute' : 'Mute me'}</button>
               <button className="rv-btn rv-btn-danger" onClick={leave}><Icon name="logout" size={16} /> Leave</button>
             </div>

@@ -37,11 +37,11 @@ export function Suggestions(props: {
           <p className="rv-eyebrow">Intent compass</p>
           <h2 id="sugg-h" className="rv-section-title flex items-center gap-2">
             <Icon name="sparkle" size={17} /> Suggested replies
-            <span className="rv-muted text-sm font-normal">drafts — nothing is spoken until you approve</span>
+            <span className="rv-muted hidden text-sm font-normal sm:inline">drafts — nothing is spoken until you approve</span>
           </h2>
         </div>
         {passport && set && (
-          <span className="rv-badge rv-badge-brand" title="Turn Passport: which partner turn and transcript revision these suggestions answer">
+          <span className="rv-badge rv-badge-brand rv-badge-wrap" title="Turn Passport: which partner turn and transcript revision these suggestions answer">
             <Icon name="link" size={13} /> Answers turn #{passport.turnId} · rev {set.turn.revision} · {set.status === 'final' ? 'final transcript' : 'partial transcript'}
           </span>
         )}
@@ -64,7 +64,7 @@ export function Suggestions(props: {
       )}
 
       {set ? (
-        <ol className="grid gap-3 md:grid-cols-3" role="list">
+        <ol className="grid gap-3 min-[1100px]:grid-cols-3" role="list">
           {set.candidates.map((c, i) => (
             <li key={c.id} data-intent={c.intent} className={`rv-sugg rv-enter rv-enter-d${i + 1} ${stale ? 'is-stale' : ''}`}>
               <div className="flex flex-wrap items-center gap-1.5">
@@ -75,15 +75,15 @@ export function Suggestions(props: {
               <button data-scan className="rv-btn rv-btn-primary" disabled={!!stale} onClick={() => props.onUse(c, set)} aria-label={`Use suggestion: ${c.text}`}>
                 <Icon name="edit" size={16} /> Use (edit before speaking)
               </button>
-              <div className="flex gap-2">
-                <button className="rv-btn flex-1 text-xs" onClick={() => props.onFeedback(c, 'sounds_like_me')}><Icon name="heart" size={14} /> Sounds like me</button>
-                <button className="rv-btn flex-1 text-xs" onClick={() => props.onFeedback(c, 'not_my_meaning')}><Icon name="thumbDown" size={14} /> Not my meaning</button>
+              <div className="flex flex-wrap gap-2">
+                <button className="rv-btn flex-1 text-xs whitespace-nowrap" onClick={() => props.onFeedback(c, 'sounds_like_me')}><Icon name="heart" size={14} /> Sounds like me</button>
+                <button className="rv-btn flex-1 text-xs whitespace-nowrap" onClick={() => props.onFeedback(c, 'not_my_meaning')}><Icon name="thumbDown" size={14} /> Not my meaning</button>
               </div>
             </li>
           ))}
         </ol>
       ) : loading ? (
-        <div className="grid gap-3 md:grid-cols-3" aria-hidden="true">
+        <div className="grid gap-3 min-[1100px]:grid-cols-3" aria-hidden="true">
           {[0, 1, 2].map((i) => <div key={i} className="rv-shimmer h-40" />)}
         </div>
       ) : (
@@ -91,7 +91,7 @@ export function Suggestions(props: {
       )}
 
       <div className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-1 flex-col gap-1 text-sm font-semibold">
+        <label className="flex min-w-[min(100%,14rem)] flex-1 flex-col gap-1 text-sm font-semibold">
           Preferred third intent (optional)
           <input className="rv-input font-normal" maxLength={80} placeholder="e.g. change the subject, make a joke" value={props.preferredIntent} onChange={(e) => props.setPreferredIntent(e.target.value)} />
         </label>

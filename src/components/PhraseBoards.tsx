@@ -65,7 +65,7 @@ export function PhraseBoards({ onPick, cacheAllowed = false }: { onPick: (text: 
           <Icon name={editing ? 'check' : 'edit'} size={15} /> {editing ? 'Done editing' : 'Edit boards'}
         </button>
       </header>
-      <div role="tablist" aria-label="Boards" className="flex flex-wrap items-center gap-2">
+      <div role="tablist" aria-label="Boards" className="rv-scroll-x -mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 sm:flex-wrap sm:overflow-visible">
         {boards.map((b) => (
           <button key={b.id} role="tab" aria-selected={active === b.id} data-scan className="rv-chip shrink-0" onClick={() => setActive(b.id)}>
             {b.name}
@@ -99,12 +99,12 @@ export function PhraseBoards({ onPick, cacheAllowed = false }: { onPick: (text: 
         <div className="grid gap-2 sm:grid-cols-2">
           <label className="flex gap-2">
             <span className="sr-only">New phrase</span>
-            <input className="rv-input flex-1" placeholder="New phrase…" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addPhrase()} />
+            <input className="rv-input min-w-0 flex-1" placeholder="New phrase…" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addPhrase()} />
             <button className="rv-btn" onClick={addPhrase}><Icon name="plus" size={15} /> Add</button>
           </label>
           <label className="flex gap-2">
             <span className="sr-only">New board name</span>
-            <input className="rv-input flex-1" placeholder="New board…" value={newBoard} onChange={(e) => setNewBoard(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addBoard()} />
+            <input className="rv-input min-w-0 flex-1" placeholder="New board…" value={newBoard} onChange={(e) => setNewBoard(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addBoard()} />
             <button className="rv-btn" onClick={addBoard}><Icon name="plus" size={15} /> Create</button>
           </label>
         </div>

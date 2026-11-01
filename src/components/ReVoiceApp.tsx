@@ -643,18 +643,19 @@ export function ReVoiceApp() {
   }
 
   return (
-    <div className="relative min-h-screen">
+    <div className="rv-shell relative">
       <Backdrop />
-      <div className="mx-auto flex max-w-[1500px] flex-col gap-4 p-3 pb-40 sm:p-5 sm:pb-40 lg:flex-row lg:gap-6">
-        {/* ------------------------------------------------ side rail (like a dock) */}
-        <aside className="lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:self-start">
+      <div className="rv-layout mx-auto flex max-w-[1500px] flex-col gap-3 sm:gap-4 lg:flex-row lg:gap-6">
+        {/* ------------------------------------------------ side rail (desktop) / sticky labelled tab bar (phones & tablets) */}
+        <aside className="rv-rail-wrap lg:sticky lg:top-5 lg:h-[calc(100dvh-2.5rem)] lg:self-start">
           <nav aria-label="Panels" className="rv-glass rv-rail h-full">
             <span className="mb-1 hidden lg:block"><Logo /></span>
-            <span className="mr-1 lg:hidden"><Logo size={38} /></span>
-            <div className="flex flex-row gap-1.5 lg:mt-auto lg:flex-col lg:gap-2">
-              {RAIL.map(([k, label, icon]) => (
+            <span className="rv-rail-logo lg:hidden"><Logo size={36} /></span>
+            <div className="rv-rail-items flex flex-row gap-1 lg:mt-auto lg:flex-col lg:gap-2">
+              {RAIL.map(([k, label, icon, short]) => (
                 <button key={k} className="rv-rail-btn" aria-current={tab === k ? 'page' : undefined} aria-label={label} onClick={() => goPanel(k)}>
                   <Icon name={icon} size={20} />
+                  <span className="rv-rail-label" aria-hidden="true">{short}</span>
                   <span className="rv-tip" aria-hidden="true">{label}</span>
                 </button>
               ))}
@@ -662,6 +663,7 @@ export function ReVoiceApp() {
             <div className="ml-auto lg:ml-0 lg:mt-auto">
               <button className="rv-rail-btn" aria-label="Show large text for your partner" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>
                 <Icon name="expand" size={20} />
+                <span className="rv-rail-label" aria-hidden="true">Large</span>
                 <span className="rv-tip" aria-hidden="true">Large text</span>
               </button>
             </div>
@@ -669,12 +671,12 @@ export function ReVoiceApp() {
         </aside>
 
         {/* ------------------------------------------------ main canvas */}
-        <main id="revoice-app" className="rv-canvas relative min-w-0 flex-1 overflow-hidden px-3 py-4 sm:px-8 sm:py-6">
-          <header className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div>
+        <main id="revoice-app" className="rv-canvas relative min-w-0 flex-1 overflow-hidden px-3 py-4 sm:px-6 sm:py-6 lg:px-8">
+          <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="min-w-0">
                 <p className="text-lg font-extrabold tracking-tight">ReVOICE</p>
-                <p className="rv-muted text-xs font-semibold">Human-gated voice · you approve every word</p>
+                <p className="rv-muted truncate text-xs font-semibold">Human-gated voice · you approve every word</p>
               </div>
             </div>
             <AuthControls needsSignIn={needsSignIn} status={status} />
@@ -692,7 +694,7 @@ export function ReVoiceApp() {
           )}
 
           {/* ------------------------------------------------ hero + orb */}
-          <section aria-labelledby="hero-h" className={`grid justify-items-center text-center ${home ? 'mt-6 gap-3 sm:mt-7' : 'mt-5 gap-2'}`}>
+          <section aria-labelledby="hero-h" className={`rv-hero grid justify-items-center text-center ${home ? 'mt-5 gap-2 sm:mt-7 sm:gap-3' : 'is-compact mt-4 gap-2 sm:mt-5'}`}>
             <h1 id="hero-h" className="rv-hero-title rv-enter">
               <span className="sr-only">ReVOICE: AI listens, you approve every word, your voice speaks.</span>
               <span aria-hidden="true">
@@ -701,18 +703,18 @@ export function ReVoiceApp() {
                 <span className="rv-gradient-text">Word You Speak</span>
               </span>
             </h1>
-            {home && <p className="rv-muted rv-enter rv-enter-d1 hidden max-w-xl text-base sm:block">Your partner speaks, ReVOICE drafts three options, and nothing is said until you approve the exact words.</p>}
-            <div className={`rv-enter rv-enter-d2 ${home ? 'my-3' : 'my-1'}`}>
+            {home && <p className="rv-hero-lede rv-muted rv-enter rv-enter-d1 hidden max-w-xl text-base sm:block">Your partner speaks, ReVOICE drafts three options, and nothing is said until you approve the exact words.</p>}
+            <div className={`rv-hero-orb rv-enter rv-enter-d2 ${home ? 'my-2 sm:my-3' : 'my-1'}`}>
               <Orb state={orbState} size={home ? 150 : 84} reflection={home} />
             </div>
-            <p className={`rv-badge rv-enter rv-enter-d2 ${orbState === 'speaking' || orbState === 'listening' ? 'rv-badge-brand' : ''} ${home ? 'mt-5' : 'mt-1'}`} aria-live="polite">
+            <p className={`rv-badge rv-enter rv-enter-d2 max-w-full ${orbState === 'speaking' || orbState === 'listening' ? 'rv-badge-brand' : ''} ${home ? 'mt-4 sm:mt-5' : 'mt-1'}`} aria-live="polite">
               {orbState === 'speaking' || orbState === 'listening' ? <span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> : <Icon name="sparkle" size={13} />}
               {orbCaption}
             </p>
           </section>
 
           {/* ------------------------------------------------ quick-action chips */}
-          <div className="rv-enter rv-enter-d3 mx-auto mt-4 flex max-w-3xl flex-wrap justify-center gap-2" role="group" aria-label="Quick actions">
+          <div className="rv-quick rv-enter rv-enter-d3 mx-auto mt-4 flex max-w-3xl flex-wrap justify-center gap-2" role="group" aria-label="Quick actions">
             {!session ? (
               <button data-scan className="rv-chip" onClick={() => { setTab('session'); void startSession() }} disabled={!online || !listenAvailable}>
                 <Icon name="headphones" size={15} /> Start listening
@@ -722,14 +724,14 @@ export function ReVoiceApp() {
                 <Icon name={listening === 'paused' ? 'play' : 'pause'} size={14} /> {listening === 'paused' ? 'Resume listening' : 'Pause listening'}
               </button>
             )}
-            <button data-scan className="rv-chip" disabled={speaking} onClick={holdMyTurn} title="Speaks your Hold My Turn phrase now">
-              <Icon name="hand" size={15} /> “{prefs.holdTurnPhrase}”
+            <button data-scan className="rv-chip rv-chip-quote" disabled={speaking} onClick={holdMyTurn} title="Speaks your Hold My Turn phrase now">
+              <Icon name="hand" size={15} /> <span className="truncate">“{prefs.holdTurnPhrase}”</span>
             </button>
             <button className="rv-chip" onClick={() => { setTab('session'); requestAnimationFrame(() => document.getElementById('phrase-boards')?.scrollIntoView({ behavior: 'smooth', block: 'start' })) }}>
               <Icon name="grid" size={15} /> Phrase boards
             </button>
-            <button className="rv-chip" onClick={() => goPanel('voice')}>
-              <Icon name="voice" size={15} /> {voice.label}
+            <button className="rv-chip rv-chip-quote" onClick={() => goPanel('voice')}>
+              <Icon name="voice" size={15} /> <span className="truncate">{voice.label}</span>
             </button>
           </div>
 
@@ -737,7 +739,7 @@ export function ReVoiceApp() {
           <section id="composer" aria-labelledby="composer-h" className="rv-enter rv-enter-d4 mx-auto mt-4 grid w-full max-w-3xl gap-3">
             <h2 id="composer-h" className="sr-only">Your message</h2>
             {composerSource && (
-              <p className={`rv-badge self-start ${sourceStale ? 'rv-badge-warn' : 'rv-badge-brand'}`}>
+              <p className={`rv-badge rv-badge-wrap self-start ${sourceStale ? 'rv-badge-warn' : 'rv-badge-brand'}`}>
                 {sourceStale ? <><Icon name="alert" size={13} /> Context changed since this suggestion ({sourceStale.replace(/_/g, ' ')}). If you speak it, it is sent as your own words.</> : <><Icon name="link" size={13} /> From suggestion ({composerSource.intent}) · answers turn #{composerSource.turn.turnId}{composer !== composerSource.original ? ' · edited' : ''}</>}
               </p>
             )}
@@ -753,34 +755,36 @@ export function ReVoiceApp() {
                   onChange={(e) => onComposerChange(e.target.value)}
                   aria-describedby="composer-help"
                 />
-                <div className="flex flex-wrap items-center gap-2 px-3 pb-3">
-                  <button className="rv-chip" disabled={!composer} onClick={() => { setComposer(''); setComposerSource(null); setSourceStale(null); speech?.edit('') }}>
-                    <Icon name="x" size={14} /> Clear
-                  </button>
-                  <button data-scan className="rv-chip" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>
-                    <Icon name="type" size={14} /> Show large text
-                  </button>
-                  <span className="rv-muted hidden text-xs tabular-nums sm:inline" aria-hidden="true">{composer.length}/1000</span>
-                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                <div className="rv-composer-bar">
+                  <div className="rv-composer-tools">
+                    <button className="rv-chip" disabled={!composer} onClick={() => { setComposer(''); setComposerSource(null); setSourceStale(null); speech?.edit('') }}>
+                      <Icon name="x" size={14} /> Clear
+                    </button>
+                    <button data-scan className="rv-chip" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>
+                      <Icon name="type" size={14} /> <span className="sm:hidden">Large text</span><span className="hidden sm:inline">Show large text</span>
+                    </button>
+                    <span className="rv-muted ml-auto text-xs tabular-nums sm:ml-0" aria-hidden="true">{composer.length}/1000</span>
+                  </div>
+                  <div className="rv-composer-actions">
                     {prefs.deviceVoiceFallback && cloudVoiceDown && (
                       <button data-scan className="rv-btn text-sm" disabled={!composer.trim()} onClick={() => speakDevice(composer)} title="Uses this device's built-in voice, not your ReVOICE voice">
-                        <Icon name="voice" size={15} /> Speak with device voice
+                        <Icon name="voice" size={15} /> <span className="sm:hidden">Device voice</span><span className="hidden sm:inline">Speak with device voice</span>
                       </button>
                     )}
-                    <button data-scan className="rv-btn rv-btn-primary px-6 text-lg" disabled={!composer.trim() || speaking} onClick={() => void doSpeak(composer)}>
+                    <button data-scan className="rv-btn rv-btn-primary rv-speak px-6 text-lg" disabled={!composer.trim() || speaking} onClick={() => void doSpeak(composer)}>
                       <Icon name="send" size={17} /> Speak
                     </button>
                   </div>
                 </div>
               </div>
             </div>
-            <p id="composer-help" className="rv-muted text-center text-xs">Speak says exactly this text. <kbd className="rv-badge">Ctrl+Enter</kbd> Speak · <kbd className="rv-badge">Esc</kbd> Stop</p>
+            <p id="composer-help" className="rv-muted text-center text-xs">Speak says exactly this text.<span className="rv-kbd-hint"> <kbd className="rv-badge">Ctrl+Enter</kbd> Speak · <kbd className="rv-badge">Esc</kbd> Stop</span></p>
 
             {confirming && (
               <div role="dialog" aria-modal="false" aria-labelledby="confirm-h" className="rv-glass rv-pop grid gap-3 p-4">
                 <h3 id="confirm-h" className="rv-section-title">Speak exactly this?</h3>
                 <p className="text-xl font-medium">“{confirming.text}”</p>
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2 min-[400px]:flex-row">
                   <button data-scan className="rv-btn rv-btn-primary flex-1" autoFocus onClick={() => void doSpeak(confirming.text, { cacheable: confirming.cacheable, speakNow: confirming.speakNow, confirmed: true })}>Yes, speak</button>
                   <button data-scan className="rv-btn flex-1" onClick={() => setConfirming(null)}>No</button>
                 </div>
@@ -789,8 +793,8 @@ export function ReVoiceApp() {
             {holding && (
               <div role="status" className="rv-alert rv-alert-info rv-pop">
                 <Icon name="clock" size={16} />
-                <span className="flex-1">Approved — waiting for your partner to pause: “{output.text}”</span>
-                <button data-scan className="rv-btn rv-btn-primary" onClick={() => void speech?.speakNow()}>Speak now</button>
+                <span className="min-w-[12rem] flex-1">Approved — waiting for your partner to pause: “{output.text}”</span>
+                <button data-scan className="rv-btn rv-btn-primary w-full sm:w-auto" onClick={() => void speech?.speakNow()}>Speak now</button>
               </div>
             )}
             {output.kind === 'delivery_uncertain' && (
@@ -806,7 +810,7 @@ export function ReVoiceApp() {
           </section>
 
           {/* ------------------------------------------------ conversation area */}
-          <div className="mx-auto mt-8 grid w-full max-w-6xl gap-4">
+          <div className="mx-auto mt-6 grid w-full max-w-6xl gap-4 sm:mt-8">
             {session && (
               <section id="live-captions" aria-labelledby="captions-h" className="rv-glass rv-enter grid gap-3 p-4 sm:p-5">
                 <header className="flex flex-wrap items-center justify-between gap-2">
@@ -821,7 +825,7 @@ export function ReVoiceApp() {
                 </header>
                 <ol className="grid gap-2" aria-label="Recent partner turns">
                   {turns.map((t) => (
-                    <li key={t.turnId} className={`rv-bubble rv-pop ${t.endOfTurn ? '' : 'partial'}`}>
+                    <li key={t.turnId} className={`rv-bubble rv-pop break-words ${t.endOfTurn ? '' : 'partial'}`}>
                       {t.text || '…'} {!t.endOfTurn && <span className="sr-only">(still speaking)</span>}
                     </li>
                   ))}
@@ -852,7 +856,7 @@ export function ReVoiceApp() {
             {/* ------------------------------------------------ active rail view */}
             <div id={`panel-${tab}`} tabIndex={-1} className="grid gap-4 outline-none" aria-label={RAIL.find(([k]) => k === tab)?.[1]}>
               {tab === 'session' && (
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
+                <div className="grid gap-4 min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
                   <section id="session-panel" aria-labelledby="session-h" className="rv-glass rv-enter grid content-start gap-4 p-4 sm:p-5">
                     <header>
                       <p className="rv-eyebrow">Explicit · bounded · billed by connected time</p>
@@ -888,18 +892,18 @@ export function ReVoiceApp() {
                         {inviteUrl && (
                           <div className="grid gap-1">
                             <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (expires in 30 min)</label>
-                            <div className="flex gap-2">
-                              <input id="invite-url" className="rv-input flex-1 text-sm" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} />
+                            <div className="flex flex-col gap-2 min-[420px]:flex-row">
+                              <input id="invite-url" className="rv-input min-w-0 flex-1 text-sm" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} />
                               <button className="rv-btn" onClick={() => void navigator.clipboard?.writeText(inviteUrl)}><Icon name="copy" size={15} /> Copy</button>
                             </div>
                           </div>
                         )}
                         <div className="flex flex-wrap gap-2">
-                          <button data-scan className="rv-btn" onClick={togglePause}>
+                          <button data-scan className="rv-btn flex-1 sm:flex-none" onClick={togglePause}>
                             <Icon name={listening === 'paused' ? 'play' : 'pause'} size={15} />
                             {listening === 'paused' ? 'Resume listening' : session.kind === 'direct' ? 'Pause (disconnects)' : 'Pause listening'}
                           </button>
-                          <button data-scan className="rv-btn rv-btn-danger" onClick={() => void endSession('user')}>End session</button>
+                          <button data-scan className="rv-btn rv-btn-danger flex-1 sm:flex-none" onClick={() => void endSession('user')}>End session</button>
                         </div>
                         {session.kind === 'livekit' && status?.providers.phoneInbound && <PhonePanel active={!!session} />}
                       </>
@@ -924,30 +928,29 @@ export function ReVoiceApp() {
             </div>
           </div>
 
-          <footer className="rv-muted mx-auto mt-8 max-w-3xl text-center text-xs">
+          <footer className="rv-muted mx-auto mt-6 max-w-3xl text-center text-xs sm:mt-8">
             ReVOICE is an assistive-communication prototype, not a medical device. Do not use with real health information. AI suggestions are drafts; nothing is spoken without your approval of the exact words.
           </footer>
         </main>
       </div>
 
       {/* ------------------------------------------------ always-visible Stop */}
-      <div className="rv-stop-dock fixed inset-x-0 bottom-0 z-40 flex justify-center p-3 pt-8">
+      <div className="rv-stop-dock fixed inset-x-0 bottom-0 z-40 flex justify-center">
         <button
           id="stop-button"
           data-scan
-          className={`rv-btn rv-btn-danger rv-stop w-full max-w-xl text-xl ${speaking || holding ? 'is-live' : ''}`}
-          style={{ minHeight: 'calc(var(--target) * 1.35)' }}
+          className={`rv-btn rv-btn-danger rv-stop w-full max-w-xl ${speaking || holding ? 'is-live' : ''}`}
           onClick={stop}
           aria-label="Stop speaking now (Escape)"
         >
-          <Icon name="stop" size={20} /> STOP {speaking ? '— speaking' : holding ? '— cancel held message' : ''}
+          <Icon name="stop" size={20} /> STOP <span className="truncate">{speaking ? '— speaking' : holding ? '— cancel held' : ''}</span>
         </button>
       </div>
 
       {largeText && (
-        <div role="dialog" aria-modal="true" aria-label="Large text for your partner" className="rv-overlay rv-pop fixed inset-0 z-50 flex flex-col items-center justify-center gap-8 p-6" onClick={() => setLargeText(false)}>
-          <Orb state={speaking ? 'speaking' : 'idle'} size={72} reflection={false} />
-          <p className="max-w-5xl text-center font-extrabold leading-tight tracking-tight" style={{ fontSize: 'clamp(2rem, 7vw, 6rem)' }}>{composer.trim() || lastSpoken}</p>
+        <div role="dialog" aria-modal="true" aria-label="Large text for your partner" className="rv-overlay rv-pop fixed inset-0 z-50 flex flex-col items-center justify-center gap-6 overflow-y-auto p-6 sm:gap-8" onClick={() => setLargeText(false)}>
+          <span className="rv-overlay-orb"><Orb state={speaking ? 'speaking' : 'idle'} size={72} reflection={false} /></span>
+          <p className="max-w-5xl break-words text-center font-extrabold leading-tight tracking-tight" style={{ fontSize: 'clamp(2rem, min(8vw, 12vh), 6rem)' }}>{composer.trim() || lastSpoken}</p>
           <button className="rv-btn" autoFocus onClick={() => setLargeText(false)}><Icon name="x" size={16} /> Close (Esc)</button>
         </div>
       )}
@@ -955,13 +958,14 @@ export function ReVoiceApp() {
   )
 }
 
-const RAIL: [Tab, string, IconName][] = [
-  ['session', 'Converse', 'sparkle'],
-  ['voice', 'Voice wardrobe', 'voice'],
-  ['settings', 'Settings', 'settings'],
-  ['bank', 'Message bank', 'bank'],
-  ['privacy', 'Privacy & data', 'shield'],
-  ['metrics', 'Measurements', 'chart'],
+/** [tab, accessible name, icon, short visible label used on phones/tablets] */
+const RAIL: [Tab, string, IconName, string][] = [
+  ['session', 'Converse', 'sparkle', 'Converse'],
+  ['voice', 'Voice wardrobe', 'voice', 'Voice'],
+  ['settings', 'Settings', 'settings', 'Settings'],
+  ['bank', 'Message bank', 'bank', 'Bank'],
+  ['privacy', 'Privacy & data', 'shield', 'Privacy'],
+  ['metrics', 'Metrics & measurements', 'chart', 'Metrics'],
 ]
 const MODES: [Mode, string, string, IconName][] = [
   ['tabletop', 'Tabletop', 'This device hears your partner and plays your voice.', 'mic'],
@@ -975,7 +979,7 @@ function AuthControls({ needsSignIn, status }: { needsSignIn: boolean; status: S
   if (needsSignIn) {
     return (
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="rv-muted">Sign in for voice & suggestions (typing and phrases work without it):</span>
+        <span className="rv-muted w-full sm:w-auto">Sign in for voice & suggestions (typing and phrases work without it):</span>
         <button className="rv-btn" onClick={() => void signInWithOAuth('github')}><Icon name="plus" size={15} /> GitHub</button>
         <button className="rv-btn" onClick={() => void signInWithOAuth('google')}><Icon name="plus" size={15} /> Google</button>
       </div>
