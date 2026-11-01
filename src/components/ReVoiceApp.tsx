@@ -21,6 +21,8 @@ import { SettingsPanel } from './SettingsPanel'
 import { MessageBank } from './MessageBank'
 import { PrivacyPanel } from './PrivacyPanel'
 import { MetricsPanel } from './MetricsPanel'
+import { PhonePanel } from './PhonePanel'
+import { ReconcilePanel } from './ReconcilePanel'
 import { api, ApiError, type StatusResponse } from '@/lib/client/api'
 import { db, getCachedAudio, putCachedAudio } from '@/lib/client/db'
 import { PcmStreamPlayer } from '@/lib/client/pcm-player'
@@ -771,6 +773,7 @@ export function ReVoiceApp() {
                   <button data-scan className="rv-btn" onClick={togglePause}>{listening === 'paused' ? '▶ Resume listening' : session.kind === 'direct' ? '⏸ Pause (disconnects)' : '⏸ Pause listening'}</button>
                   <button data-scan className="rv-btn rv-btn-danger" onClick={() => void endSession('user')}>End session</button>
                 </div>
+                {session.kind === 'livekit' && status?.providers.phoneInbound && <PhonePanel active={!!session} />}
               </>
             )}
           </section>
@@ -786,7 +789,7 @@ export function ReVoiceApp() {
         )}
         {tab === 'bank' && <MessageBank />}
         {tab === 'privacy' && <PrivacyPanel />}
-        {tab === 'metrics' && <MetricsPanel status={status} />}
+        {tab === 'metrics' && (<div className="grid gap-3"><MetricsPanel status={status} />{status?.identity.kind === 'supabase' && <ReconcilePanel />}</div>)}
       </div>
 
       <footer className="rv-muted text-xs">

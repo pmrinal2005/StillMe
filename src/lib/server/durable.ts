@@ -129,3 +129,22 @@ export async function usageSummary(sinceDays = 31) {
   }
   return out
 }
+
+/** Monthly phone-call reservation (migration 0002). null = no durable store (in-memory ledger applies). */
+export async function reservePhoneCallDurable(userId: string, room: string, identity: string, monthlyCap: number, perCall: number): Promise<{ ok: true; minutes: number } | { ok: false; reason: string } | null> {
+  const sb = adminClient()
+  if (!sb || !isUuid(userId)) return null
+  const { data, error } = await sb.rpc('reserve_phone_call', { p_user: userId, p_room: room, p_identity: identity, p_monthly_cap: monthlyCap, p_per_call: perCall })
+  if (error) return { ok: false, reason: 'budget_store_unavailable' } // fail closed
+  const row = Array.isArray(data) ? data[0] : data
+  return row?.ok ? { ok: true, minutes: Number(row.minutes) } : { ok: false, reason: (row?.reason as string) ?? 'phone_cap' }
+}
+
+export async function settlePhoneCallDurable(room: string, usedMinutes: number) {
+  const sb = adminClient()
+  if (!sb) return
+  await sb.rpc('settle_phone_call', { p_room: room, p_used: usedMinutes }).then(
+    () => undefined,
+    () => undefined,
+  )
+}

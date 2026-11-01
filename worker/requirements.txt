@@ -1,0 +1,7 @@
+# Pinned after the compatibility spike (signatures verified against these exact versions).
+livekit==1.1.21
+livekit-agents==1.8.10
+livekit-api==1.2.2
+livekit-plugins-assemblyai==1.8.10
+pydantic==2.14.2
+aiohttp==3.14.5

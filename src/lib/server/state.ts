@@ -20,7 +20,9 @@ interface RvState {
   /** userId → the single active conversation (one active conversation per user) */
   sessions: Map<string, ActiveSession>
   /** phone pairing code → binding to an active owner session (expiring, single use) */
-  phoneCodes: Map<string, { userId: string; room: string; expiresAt: number }>
+  phoneCodes: Map<string, { userId: string; room: string; expiresAt: number; attempts: number }>
+  /** `${room}:${identity}` → minutes reserved for an in-progress call (settled by /api/phone/usage) */
+  phoneReservations: Map<string, { minutes: number; month: string; userId: string; at: number }>
   /** month key → inbound phone minutes used (application cap, of the 50 included) */
   phoneMinutes: Map<string, number>
   reconciliations: { at: number; provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string }[]
@@ -28,7 +30,7 @@ interface RvState {
 export interface ActiveSession { room: string; conversationId: string; mode: string; startedAt: number; maxMinutes: number; generation: number }
 const g = globalThis as unknown as { __rv?: RvState }
 if (!g.__rv) {
-  g.__rv = { ledgers: new Map(), projectLedger: new BudgetLedger(), replay: new MemoryReplayStore(), turns: new Map(), candidates: new Map(), sessions: new Map(), phoneCodes: new Map(), phoneMinutes: new Map(), reconciliations: [] }
+  g.__rv = { ledgers: new Map(), projectLedger: new BudgetLedger(), replay: new MemoryReplayStore(), turns: new Map(), candidates: new Map(), sessions: new Map(), phoneCodes: new Map(), phoneReservations: new Map(), phoneMinutes: new Map(), reconciliations: [] }
 }
 
 /** Per-user ledger AND a project-wide ledger: both must allow a request (intersecting limits). */
@@ -83,6 +85,24 @@ export const monthKey = (now = Date.now()) => new Date(now).toISOString().slice(
 export function forgetUser(userId: string) {
   g.__rv!.sessions.delete(userId)
   for (const [k, c] of g.__rv!.phoneCodes) if (c.userId === userId) g.__rv!.phoneCodes.delete(k)
+  for (const [k, r] of g.__rv!.phoneReservations) if (r.userId === userId) g.__rv!.phoneReservations.delete(k)
   g.__rv!.ledgers.delete(userId)
   for (const [k, c] of g.__rv!.candidates) if (c.owner === userId) g.__rv!.candidates.delete(k)
+}
+
+/** Month usage = settled minutes + outstanding call reservations (both count against the 40-min cap). */
+export function phoneMonthUsed(now = Date.now()): number {
+  const m = monthKey(now)
+  let used = g.__rv!.phoneMinutes.get(m) ?? 0
+  for (const [k, r] of g.__rv!.phoneReservations) {
+    // Reservations for calls that never reported usage expire after their max length + slack (counted as fully used).
+    if (now - r.at > 20 * 60_000) {
+      g.__rv!.phoneMinutes.set(r.month, (g.__rv!.phoneMinutes.get(r.month) ?? 0) + r.minutes)
+      g.__rv!.phoneReservations.delete(k)
+      if (r.month === m) used += r.minutes
+      continue
+    }
+    if (r.month === m) used += r.minutes
+  }
+  return used
 }

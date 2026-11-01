@@ -25,6 +25,11 @@ export const env = {
   supabaseAnon: () => opt('NEXT_PUBLIC_SUPABASE_ANON_KEY'),
   supabaseService: () => opt('SUPABASE_SERVICE_ROLE_KEY'),
   allowBrowserStt: () => opt('REVOICE_ALLOW_BROWSER_STT') === 'true',
+  /** Included US number only — the owner enables this ONLY if activation requires no new spending. */
+  phoneInboundEnabled: () => opt('REVOICE_PHONE_INBOUND_ENABLED') === 'true',
+  phoneNumberDisplay: () => opt('REVOICE_PHONE_NUMBER_DISPLAY'),
+  /** Comma-separated user ids allowed to record provider reconciliations (empty = any signed-in owner of this deployment). */
+  operatorIds: () => (opt('REVOICE_OPERATOR_IDS') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
   /** HMAC secret for approvals/invites. Falls back to a per-process random secret in dev only. */
   approvalSecret: (): string => {
     const s = opt('REVOICE_APPROVAL_SECRET')
@@ -49,6 +54,7 @@ export function providerStatus() {
     supabase: !!(env.supabaseUrl() && env.supabaseAnon()),
     durableStore: !!(env.supabaseUrl() && env.supabaseService()),
     browserStt: env.allowBrowserStt() && !!env.assemblyKey(),
+    phoneInbound: env.phoneInboundEnabled() && !!(env.livekitUrl() && env.livekitKey() && env.livekitSecret()),
     approvalSecretConfigured: !!process.env.REVOICE_APPROVAL_SECRET,
     region: env.assemblyRegion(),
     groqModel: env.groqModel(),
