@@ -50,7 +50,7 @@ export function PhonePanel({ active }: { active: boolean }) {
       ) : (
         <button data-scan className="rv-btn" disabled={!active} onClick={create}>📞 Create pairing code</button>
       )}
-      {err && <p role="alert" style={{ color: 'var(--warn)' }}>{err}</p>}
+      {err && <p role="alert" className="rv-text-warn">{err}</p>}
     </section>
   )
 }

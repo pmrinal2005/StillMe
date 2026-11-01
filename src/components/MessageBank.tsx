@@ -61,13 +61,13 @@ export function MessageBank() {
   }
 
   return (
-    <section id="message-bank" aria-labelledby="bank-h" className="rv-panel p-4">
-      <h2 id="bank-h" className="mb-1 text-lg font-bold">Message bank</h2>
+    <section id="message-bank" aria-labelledby="bank-h" className="rv-glass rv-enter p-4 sm:p-6">
+      <h2 id="bank-h" className="rv-section-title mb-1">Message bank</h2>
       <p className="rv-muted mb-3 text-sm">Your own original recordings. Stored only on this device and playable offline.</p>
       <ul className="mb-3 grid gap-2 sm:grid-cols-2" role="list">
         {items.map((m) => (
           <li key={m.id} className="flex gap-2">
-            <button data-scan className="rv-btn flex-1 justify-start" onClick={() => play(m)}>▶ {m.label}</button>
+            <button data-scan className="rv-tile flex-1" onClick={() => play(m)}>▶ {m.label}</button>
             <button className="rv-btn rv-btn-danger" aria-label={`Delete recording ${m.label}`} onClick={async () => { await db.bank.delete(m.id); await load() }}>✕</button>
           </li>
         ))}
@@ -80,7 +80,7 @@ export function MessageBank() {
         {recording ? <button className="rv-btn rv-btn-danger" onClick={stop}>■ Stop recording</button> : <button className="rv-btn" onClick={start}>● Record</button>}
         <label className="rv-btn cursor-pointer">Import file<input type="file" accept="audio/*" className="sr-only" onChange={(e) => importFile(e.target.files?.[0])} /></label>
       </div>
-      {err && <p role="alert" className="mt-2 text-sm" style={{ color: 'var(--warn)' }}>{err}</p>}
+      {err && <p role="alert" className="mt-2 text-sm rv-text-warn">{err}</p>}
     </section>
   )
 }

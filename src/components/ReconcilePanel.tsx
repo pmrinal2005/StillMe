@@ -39,8 +39,8 @@ export function ReconcilePanel() {
 
   if (err === 'forbidden') return null
   return (
-    <section id="reconcile-panel" aria-labelledby="reconcile-h" className="rv-panel grid gap-2 p-4 text-sm">
-      <h2 id="reconcile-h" className="text-lg font-bold">Reconcile with provider dashboards</h2>
+    <section id="reconcile-panel" aria-labelledby="reconcile-h" className="rv-glass rv-enter grid gap-2 p-4 text-sm sm:p-6">
+      <h2 id="reconcile-h" className="rv-section-title">Reconcile with provider dashboards</h2>
       <p className="rv-muted">App figures are estimates, not provider-enforced caps. Enter what each dashboard reports after smoke tests and monthly.</p>
       {data && (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
@@ -65,7 +65,7 @@ export function ReconcilePanel() {
       </form>
       {msg && <p role="status">{msg}</p>}
       {data && data.recorded.length > 0 && (
-        <table className="w-full text-left">
+        <table className="rv-table">
           <caption className="sr-only">Recorded provider figures</caption>
           <thead><tr><th>Provider</th><th>Period</th><th>USD</th></tr></thead>
           <tbody>{data.recorded.slice(0, 8).map((r, i) => <tr key={i}><td>{r.provider}</td><td>{r.periodStart} → {r.periodEnd}</td><td>{r.providerReportedUsd ?? '—'}</td></tr>)}</tbody>

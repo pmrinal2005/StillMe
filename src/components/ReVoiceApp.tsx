@@ -23,6 +23,8 @@ import { PrivacyPanel } from './PrivacyPanel'
 import { MetricsPanel } from './MetricsPanel'
 import { PhonePanel } from './PhonePanel'
 import { ReconcilePanel } from './ReconcilePanel'
+import { Icon, type IconName } from './ui/Icon'
+import { Backdrop, Logo, Orb, type OrbState } from './ui/Orb'
 import { api, ApiError, type StatusResponse } from '@/lib/client/api'
 import { db, getCachedAudio, putCachedAudio } from '@/lib/client/db'
 import { PcmStreamPlayer } from '@/lib/client/pcm-player'
@@ -619,211 +621,365 @@ export function ReVoiceApp() {
   const cloudVoiceDown = !status?.providers.assemblyai || !online || output.kind === 'error'
   const elapsedMin = session ? Math.floor((Date.now() - session.startedAt) / 60000) : 0
   const inviteUrl = session?.invite ? `${typeof window !== 'undefined' ? window.location.origin : ''}/join#${encodeURIComponent(session.invite)}` : null
+  const listenAvailable = !!(status?.providers.livekit || status?.providers.browserStt)
+  const orbState: OrbState = !online ? 'offline'
+    : speaking ? 'speaking'
+      : holding ? 'holding'
+        : output.kind === 'delivery_uncertain' || output.kind === 'error' ? 'alert'
+          : suggLoading ? 'drafting'
+            : listening === 'listening' ? 'listening'
+              : 'idle'
+  const orbCaption = !online ? 'Offline — phrases, large text and device voice still work'
+    : speaking ? 'Speaking your approved words'
+      : holding ? 'Approved — waiting for a pause'
+        : suggLoading ? 'Drafting options for you'
+          : listening === 'listening' ? (partnerPresent ? 'Listening to your partner' : 'Listening')
+            : listening === 'paused' ? 'Listening paused'
+              : 'Ready when you are'
+  const home = tab === 'session'
+  const goPanel = (k: Tab) => {
+    setTab(k)
+    requestAnimationFrame(() => document.getElementById(k === 'session' ? 'composer-input' : `panel-${k}`)?.focus({ preventScroll: false }))
+  }
 
   return (
-    <main id="revoice-app" className="mx-auto grid max-w-6xl gap-4 p-3 pb-40 sm:p-6 sm:pb-40">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-2xl font-extrabold">ReVOICE <span className="rv-muted text-base font-normal">— you approve every word</span></h1>
-        <AuthControls needsSignIn={needsSignIn} status={status} />
-      </header>
-
-      <StatusBar status={status} online={online} output={output} listening={listening} voiceLabel={voice.label} voiceWarning={voice.warning} />
-
-      {notice && <p role="alert" className="rv-panel p-3" style={{ borderColor: 'var(--warn)' }}>{notice} <button className="rv-btn ml-2 text-sm" onClick={() => setNotice(null)}>Dismiss</button></p>}
-
-      {/* ------------------------------------------------ live captions */}
-      {session && (
-        <section id="live-captions" aria-labelledby="captions-h" className="rv-panel p-4">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h2 id="captions-h" className="text-lg font-bold">Partner captions</h2>
-            <span className="rv-muted text-sm">{partnerPresent ? 'Partner connected · ' : ''}{session.mode} · {elapsedMin}/{session.maxMinutes} min</span>
-          </div>
-          <ol className="grid gap-1" aria-label="Recent partner turns">
-            {turns.map((t) => (
-              <li key={t.turnId} className={t.endOfTurn ? 'text-lg' : 'rv-muted text-lg italic'}>
-                {t.text || '…'} {!t.endOfTurn && <span className="sr-only">(still speaking)</span>}
-              </li>
-            ))}
-            {turns.length === 0 && <li className="rv-muted">Waiting for your partner to speak…</li>}
-          </ol>
-          <p className="sr-only" aria-live="polite">{latestTurn?.endOfTurn ? `Partner said: ${latestTurn.text}` : ''}</p>
-        </section>
-      )}
-
-      {/* ------------------------------------------------ suggestions */}
-      {prefs.aiSuggestions && session && (
-        <Suggestions
-          set={set}
-          pending={pending}
-          stale={stale}
-          loading={suggLoading}
-          error={suggError}
-          passport={set ? { turnId: set.turn.turnId, revision: set.turn.revision, final: set.status === 'final' } : null}
-          onEngage={() => { engagedRef.current = true }}
-          onUse={useCandidate}
-          onAcceptPending={acceptPending}
-          onFeedback={(c, verdict) => void db.feedback.add({ id: randomId(8), at: Date.now(), intent: c.intent, verdict, edited: false })}
-          onRegenerate={regenerate}
-          preferredIntent={prefs.preferredIntent}
-          setPreferredIntent={(s) => update({ preferredIntent: s })}
-        />
-      )}
-
-      {/* ------------------------------------------------ composer */}
-      <section id="composer" aria-labelledby="composer-h" className="rv-panel grid gap-3 p-4">
-        <h2 id="composer-h" className="text-lg font-bold">Your message</h2>
-        {composerSource && (
-          <p className="rv-badge self-start" style={sourceStale ? { borderColor: 'var(--warn)' } : {}}>
-            {sourceStale ? `⚠ Context changed since this suggestion (${sourceStale.replace(/_/g, ' ')}). If you speak it, it is sent as your own words.` : `From suggestion (${composerSource.intent}) · answers turn #${composerSource.turn.turnId}${composer !== composerSource.original ? ' · edited' : ''}`}
-          </p>
-        )}
-        <label htmlFor="composer-input" className="sr-only">Message to speak</label>
-        <textarea
-          id="composer-input"
-          className="rv-input min-h-32 text-2xl leading-snug"
-          value={composer}
-          maxLength={1000}
-          placeholder="Type what you want to say…"
-          onChange={(e) => onComposerChange(e.target.value)}
-          aria-describedby="composer-help"
-        />
-        <p id="composer-help" className="rv-muted text-sm">Speak says exactly this text. Ctrl+Enter = Speak · Esc = Stop.</p>
-        <div className="flex flex-wrap gap-2">
-          <button data-scan className="rv-btn rv-btn-primary flex-1 text-xl" disabled={!composer.trim() || speaking} onClick={() => void doSpeak(composer)}>🔊 Speak</button>
-          <button data-scan className="rv-btn" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>Show large text</button>
-          <button data-scan className="rv-btn" disabled={speaking} onClick={holdMyTurn} title="Speaks your Hold My Turn phrase now">✋ “{prefs.holdTurnPhrase}”</button>
-          <button className="rv-btn" disabled={!composer} onClick={() => { setComposer(''); setComposerSource(null); setSourceStale(null); speech?.edit('') }}>Clear</button>
-          {prefs.deviceVoiceFallback && cloudVoiceDown && (
-            <button data-scan className="rv-btn" disabled={!composer.trim()} onClick={() => speakDevice(composer)} title="Uses this device's built-in voice, not your ReVOICE voice">Speak with device voice</button>
-          )}
-        </div>
-
-        {confirming && (
-          <div role="dialog" aria-modal="false" aria-labelledby="confirm-h" className="rv-panel grid gap-2 p-3" style={{ borderColor: 'var(--accent)' }}>
-            <h3 id="confirm-h" className="font-bold">Speak exactly this?</h3>
-            <p className="text-xl">“{confirming.text}”</p>
-            <div className="flex gap-2">
-              <button data-scan className="rv-btn rv-btn-primary flex-1" autoFocus onClick={() => void doSpeak(confirming.text, { cacheable: confirming.cacheable, speakNow: confirming.speakNow, confirmed: true })}>Yes, speak</button>
-              <button data-scan className="rv-btn flex-1" onClick={() => setConfirming(null)}>No</button>
-            </div>
-          </div>
-        )}
-        {holding && (
-          <div role="status" className="rv-panel flex flex-wrap items-center gap-2 p-3" style={{ borderColor: 'var(--accent)' }}>
-            <span className="flex-1">Approved — waiting for your partner to pause: “{output.text}”</span>
-            <button data-scan className="rv-btn rv-btn-primary" onClick={() => void speech?.speakNow()}>Speak now</button>
-          </div>
-        )}
-        {output.kind === 'delivery_uncertain' && (
-          <div role="alert" className="rv-panel grid gap-2 p-3" style={{ borderColor: 'var(--warn)' }}>
-            <p><strong>Delivery uncertain.</strong> The connection failed while speaking — your partner may have heard part or none of: “{output.text}”. It will not be replayed automatically.</p>
-            <div className="flex gap-2">
-              <button data-scan className="rv-btn" onClick={() => { const t = output.text; speech?.reset(); void doSpeak(t) }}>Replay (asks for new approval)</button>
-              <button className="rv-btn" onClick={() => speech?.reset()}>Dismiss</button>
-            </div>
-          </div>
-        )}
-        {output.kind === 'interrupted' && <p role="status" className="rv-muted">Stopped. Interrupted messages never resume on their own.</p>}
-        {output.kind === 'error' && <p role="alert" style={{ color: 'var(--warn)' }}>Could not speak ({output.message.replace(/_/g, ' ')}). Nothing was replayed automatically.</p>}
-        {output.kind === 'paused_for_budget' && <p role="alert" style={{ color: 'var(--warn)' }}>Voice paused by the daily budget ({output.reason.replace(/_/g, ' ')}). Use the device voice, large text or your message bank.</p>}
-      </section>
-
-      <PhraseBoards onPick={(text, o) => { setComposer(text); setComposerSource(null); setSourceStale(null); speech?.edit(text); if (o.cacheable) void doSpeak(text, { cacheable: true }) }} cacheAllowed={isLibraryVoice(voice.id)} />
-
-      {/* ------------------------------------------------ secondary panels */}
-      <nav aria-label="Panels" className="flex flex-wrap gap-2" role="tablist">
-        {([['session', 'Listening'], ['voice', 'Voice'], ['settings', 'Settings'], ['bank', 'Message bank'], ['privacy', 'Privacy'], ['metrics', 'Measurements']] as [Tab, string][]).map(([k, label]) => (
-          <button key={k} role="tab" aria-selected={tab === k} aria-controls={`panel-${k}`} className="rv-btn" onClick={() => setTab(k)}>{label}</button>
-        ))}
-      </nav>
-      <div id={`panel-${tab}`} role="tabpanel">
-        {tab === 'session' && (
-          <section id="session-panel" aria-labelledby="session-h" className="rv-panel grid gap-3 p-4">
-            <h2 id="session-h" className="text-lg font-bold">Listening session</h2>
-            <p className="rv-muted text-sm">Listening is always explicit, bounded ({status?.budget.limits?.assembly.interactiveSessionMinutes ?? 20} min max), and billed by connected time — pausing disconnects transcription. Your partner must know they are being transcribed.</p>
-            {!session ? (
-              <>
-                <fieldset className="grid gap-2 sm:grid-cols-3">
-                  <legend className="sr-only">Conversation mode</legend>
-                  {([['tabletop', 'Tabletop', 'This device hears your partner and plays your voice.'], ['partner-link', 'Partner link', 'Partner joins on their phone with a link; cleaner audio separation.'], ['remote', 'Remote call', 'Browser call with a remote partner.']] as [Mode, string, string][]).map(([k, l, d]) => (
-                    <label key={k} className="rv-btn flex-col items-start text-left">
-                      <span><input type="radio" name="mode" checked={mode === k} onChange={() => setMode(k)} disabled={!status?.providers.livekit && k !== 'tabletop'} /> <strong>{l}</strong></span>
-                      <span className="rv-muted text-xs font-normal">{d}</span>
-                    </label>
-                  ))}
-                </fieldset>
-                <button data-scan className="rv-btn rv-btn-primary" onClick={startSession} disabled={!online || (!status?.providers.livekit && !status?.providers.browserStt)}>
-                  🎧 Start listening
+    <div className="relative min-h-screen">
+      <Backdrop />
+      <div className="mx-auto flex max-w-[1500px] flex-col gap-4 p-3 pb-40 sm:p-5 sm:pb-40 lg:flex-row lg:gap-6">
+        {/* ------------------------------------------------ side rail (like a dock) */}
+        <aside className="lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:self-start">
+          <nav aria-label="Panels" className="rv-glass rv-rail h-full">
+            <span className="mb-1 hidden lg:block"><Logo /></span>
+            <span className="mr-1 lg:hidden"><Logo size={38} /></span>
+            <div className="flex flex-row gap-1.5 lg:mt-auto lg:flex-col lg:gap-2">
+              {RAIL.map(([k, label, icon]) => (
+                <button key={k} className="rv-rail-btn" aria-current={tab === k ? 'page' : undefined} aria-label={label} onClick={() => goPanel(k)}>
+                  <Icon name={icon} size={20} />
+                  <span className="rv-tip" aria-hidden="true">{label}</span>
                 </button>
-                {status && !status.providers.livekit && !status.providers.browserStt && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
-              </>
-            ) : (
-              <>
-                <p>State: <strong>{listening}</strong> · {session.kind === 'livekit' ? 'LiveKit worker' : 'direct (trusted demo)'} · ends automatically after {session.maxMinutes} min</p>
-                {inviteUrl && (
-                  <div className="grid gap-1">
-                    <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (expires in 30 min)</label>
-                    <div className="flex gap-2">
-                      <input id="invite-url" className="rv-input flex-1 text-sm" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} />
-                      <button className="rv-btn" onClick={() => void navigator.clipboard?.writeText(inviteUrl)}>Copy</button>
-                    </div>
-                  </div>
-                )}
-                <div className="flex flex-wrap gap-2">
-                  <button data-scan className="rv-btn" onClick={togglePause}>{listening === 'paused' ? '▶ Resume listening' : session.kind === 'direct' ? '⏸ Pause (disconnects)' : '⏸ Pause listening'}</button>
-                  <button data-scan className="rv-btn rv-btn-danger" onClick={() => void endSession('user')}>End session</button>
-                </div>
-                {session.kind === 'livekit' && status?.providers.phoneInbound && <PhonePanel active={!!session} />}
-              </>
-            )}
-          </section>
-        )}
-        {tab === 'voice' && <VoiceWardrobe voiceId={prefs.voiceId} outputLanguage={prefs.outputLanguage} region={region} onSelect={(id) => update({ voiceId: id })} onVoicesChanged={reloadClones} />}
-        {tab === 'settings' && (
-          <div className="grid gap-3">
-            <SettingsPanel prefs={prefs} update={update} />
-            <label className="rv-panel grid gap-1 p-4 text-sm">“Hold My Turn” phrase (spoken exactly as written when you press it)
-              <input className="rv-input" maxLength={120} value={prefs.holdTurnPhrase} onChange={(e) => update({ holdTurnPhrase: e.target.value || 'I have something to add.' })} />
-            </label>
+              ))}
+            </div>
+            <div className="ml-auto lg:ml-0 lg:mt-auto">
+              <button className="rv-rail-btn" aria-label="Show large text for your partner" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>
+                <Icon name="expand" size={20} />
+                <span className="rv-tip" aria-hidden="true">Large text</span>
+              </button>
+            </div>
+          </nav>
+        </aside>
+
+        {/* ------------------------------------------------ main canvas */}
+        <main id="revoice-app" className="rv-canvas relative min-w-0 flex-1 overflow-hidden px-3 py-4 sm:px-8 sm:py-6">
+          <header className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div>
+                <p className="text-lg font-extrabold tracking-tight">ReVOICE</p>
+                <p className="rv-muted text-xs font-semibold">Human-gated voice · you approve every word</p>
+              </div>
+            </div>
+            <AuthControls needsSignIn={needsSignIn} status={status} />
+          </header>
+
+          <div className="mt-4">
+            <StatusBar status={status} online={online} output={output} listening={listening} voiceLabel={voice.label} voiceWarning={voice.warning} />
           </div>
-        )}
-        {tab === 'bank' && <MessageBank />}
-        {tab === 'privacy' && <PrivacyPanel />}
-        {tab === 'metrics' && (<div className="grid gap-3"><MetricsPanel status={status} />{status?.identity.kind === 'supabase' && <ReconcilePanel />}</div>)}
+
+          {notice && (
+            <p role="alert" className="rv-alert rv-alert-warn rv-pop mt-3">
+              <Icon name="alert" size={16} /> <span className="flex-1">{notice}</span>
+              <button className="rv-btn text-sm" onClick={() => setNotice(null)}>Dismiss</button>
+            </p>
+          )}
+
+          {/* ------------------------------------------------ hero + orb */}
+          <section aria-labelledby="hero-h" className={`grid justify-items-center text-center ${home ? 'mt-6 gap-3 sm:mt-7' : 'mt-5 gap-2'}`}>
+            <h1 id="hero-h" className="rv-hero-title rv-enter">
+              <span className="sr-only">ReVOICE: AI listens, you approve every word, your voice speaks.</span>
+              <span aria-hidden="true">
+                <span className="rv-fade-word">AI Listens.</span> You Approve <span className="rv-fade-word-r">Every</span>
+                <br />
+                <span className="rv-gradient-text">Word You Speak</span>
+              </span>
+            </h1>
+            {home && <p className="rv-muted rv-enter rv-enter-d1 hidden max-w-xl text-base sm:block">Your partner speaks, ReVOICE drafts three options, and nothing is said until you approve the exact words.</p>}
+            <div className={`rv-enter rv-enter-d2 ${home ? 'my-3' : 'my-1'}`}>
+              <Orb state={orbState} size={home ? 150 : 84} reflection={home} />
+            </div>
+            <p className={`rv-badge rv-enter rv-enter-d2 ${orbState === 'speaking' || orbState === 'listening' ? 'rv-badge-brand' : ''} ${home ? 'mt-5' : 'mt-1'}`} aria-live="polite">
+              {orbState === 'speaking' || orbState === 'listening' ? <span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> : <Icon name="sparkle" size={13} />}
+              {orbCaption}
+            </p>
+          </section>
+
+          {/* ------------------------------------------------ quick-action chips */}
+          <div className="rv-enter rv-enter-d3 mx-auto mt-4 flex max-w-3xl flex-wrap justify-center gap-2" role="group" aria-label="Quick actions">
+            {!session ? (
+              <button data-scan className="rv-chip" onClick={() => { setTab('session'); void startSession() }} disabled={!online || !listenAvailable}>
+                <Icon name="headphones" size={15} /> Start listening
+              </button>
+            ) : (
+              <button data-scan className="rv-chip" aria-pressed={listening === 'listening'} onClick={togglePause}>
+                <Icon name={listening === 'paused' ? 'play' : 'pause'} size={14} /> {listening === 'paused' ? 'Resume listening' : 'Pause listening'}
+              </button>
+            )}
+            <button data-scan className="rv-chip" disabled={speaking} onClick={holdMyTurn} title="Speaks your Hold My Turn phrase now">
+              <Icon name="hand" size={15} /> “{prefs.holdTurnPhrase}”
+            </button>
+            <button className="rv-chip" onClick={() => { setTab('session'); requestAnimationFrame(() => document.getElementById('phrase-boards')?.scrollIntoView({ behavior: 'smooth', block: 'start' })) }}>
+              <Icon name="grid" size={15} /> Phrase boards
+            </button>
+            <button className="rv-chip" onClick={() => goPanel('voice')}>
+              <Icon name="voice" size={15} /> {voice.label}
+            </button>
+          </div>
+
+          {/* ------------------------------------------------ composer (the "ask me anything" card) */}
+          <section id="composer" aria-labelledby="composer-h" className="rv-enter rv-enter-d4 mx-auto mt-4 grid w-full max-w-3xl gap-3">
+            <h2 id="composer-h" className="sr-only">Your message</h2>
+            {composerSource && (
+              <p className={`rv-badge self-start ${sourceStale ? 'rv-badge-warn' : 'rv-badge-brand'}`}>
+                {sourceStale ? <><Icon name="alert" size={13} /> Context changed since this suggestion ({sourceStale.replace(/_/g, ' ')}). If you speak it, it is sent as your own words.</> : <><Icon name="link" size={13} /> From suggestion ({composerSource.intent}) · answers turn #{composerSource.turn.turnId}{composer !== composerSource.original ? ' · edited' : ''}</>}
+              </p>
+            )}
+            <div className={`rv-iris ${speaking || suggLoading ? 'is-active' : ''}`}>
+              <div className="rv-iris-inner">
+                <label htmlFor="composer-input" className="sr-only">Message to speak</label>
+                <textarea
+                  id="composer-input"
+                  className="rv-composer-text"
+                  value={composer}
+                  maxLength={1000}
+                  placeholder="Type what you want to say…"
+                  onChange={(e) => onComposerChange(e.target.value)}
+                  aria-describedby="composer-help"
+                />
+                <div className="flex flex-wrap items-center gap-2 px-3 pb-3">
+                  <button className="rv-chip" disabled={!composer} onClick={() => { setComposer(''); setComposerSource(null); setSourceStale(null); speech?.edit('') }}>
+                    <Icon name="x" size={14} /> Clear
+                  </button>
+                  <button data-scan className="rv-chip" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>
+                    <Icon name="type" size={14} /> Show large text
+                  </button>
+                  <span className="rv-muted hidden text-xs tabular-nums sm:inline" aria-hidden="true">{composer.length}/1000</span>
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    {prefs.deviceVoiceFallback && cloudVoiceDown && (
+                      <button data-scan className="rv-btn text-sm" disabled={!composer.trim()} onClick={() => speakDevice(composer)} title="Uses this device's built-in voice, not your ReVOICE voice">
+                        <Icon name="voice" size={15} /> Speak with device voice
+                      </button>
+                    )}
+                    <button data-scan className="rv-btn rv-btn-primary px-6 text-lg" disabled={!composer.trim() || speaking} onClick={() => void doSpeak(composer)}>
+                      <Icon name="send" size={17} /> Speak
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p id="composer-help" className="rv-muted text-center text-xs">Speak says exactly this text. <kbd className="rv-badge">Ctrl+Enter</kbd> Speak · <kbd className="rv-badge">Esc</kbd> Stop</p>
+
+            {confirming && (
+              <div role="dialog" aria-modal="false" aria-labelledby="confirm-h" className="rv-glass rv-pop grid gap-3 p-4">
+                <h3 id="confirm-h" className="rv-section-title">Speak exactly this?</h3>
+                <p className="text-xl font-medium">“{confirming.text}”</p>
+                <div className="flex gap-2">
+                  <button data-scan className="rv-btn rv-btn-primary flex-1" autoFocus onClick={() => void doSpeak(confirming.text, { cacheable: confirming.cacheable, speakNow: confirming.speakNow, confirmed: true })}>Yes, speak</button>
+                  <button data-scan className="rv-btn flex-1" onClick={() => setConfirming(null)}>No</button>
+                </div>
+              </div>
+            )}
+            {holding && (
+              <div role="status" className="rv-alert rv-alert-info rv-pop">
+                <Icon name="clock" size={16} />
+                <span className="flex-1">Approved — waiting for your partner to pause: “{output.text}”</span>
+                <button data-scan className="rv-btn rv-btn-primary" onClick={() => void speech?.speakNow()}>Speak now</button>
+              </div>
+            )}
+            {output.kind === 'delivery_uncertain' && (
+              <div role="alert" className="rv-alert rv-alert-warn rv-pop">
+                <p className="w-full"><strong>Delivery uncertain.</strong> The connection failed while speaking — your partner may have heard part or none of: “{output.text}”. It will not be replayed automatically.</p>
+                <button data-scan className="rv-btn" onClick={() => { const t = output.text; speech?.reset(); void doSpeak(t) }}>Replay (asks for new approval)</button>
+                <button className="rv-btn" onClick={() => speech?.reset()}>Dismiss</button>
+              </div>
+            )}
+            {output.kind === 'interrupted' && <p role="status" className="rv-muted text-center text-sm">Stopped. Interrupted messages never resume on their own.</p>}
+            {output.kind === 'error' && <p role="alert" className="rv-alert rv-alert-warn">Could not speak ({output.message.replace(/_/g, ' ')}). Nothing was replayed automatically.</p>}
+            {output.kind === 'paused_for_budget' && <p role="alert" className="rv-alert rv-alert-warn">Voice paused by the daily budget ({output.reason.replace(/_/g, ' ')}). Use the device voice, large text or your message bank.</p>}
+          </section>
+
+          {/* ------------------------------------------------ conversation area */}
+          <div className="mx-auto mt-8 grid w-full max-w-6xl gap-4">
+            {session && (
+              <section id="live-captions" aria-labelledby="captions-h" className="rv-glass rv-enter grid gap-3 p-4 sm:p-5">
+                <header className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="rv-eyebrow">Live · revisions replace, never append</p>
+                    <h2 id="captions-h" className="rv-section-title flex items-center gap-2"><Icon name="mic" size={17} /> Partner captions</h2>
+                  </div>
+                  <span className="rv-badge">
+                    {partnerPresent && <><span className="rv-dot live" style={{ background: 'var(--ok)' }} aria-hidden="true" />Partner connected · </>}
+                    {session.mode} · {elapsedMin}/{session.maxMinutes} min
+                  </span>
+                </header>
+                <ol className="grid gap-2" aria-label="Recent partner turns">
+                  {turns.map((t) => (
+                    <li key={t.turnId} className={`rv-bubble rv-pop ${t.endOfTurn ? '' : 'partial'}`}>
+                      {t.text || '…'} {!t.endOfTurn && <span className="sr-only">(still speaking)</span>}
+                    </li>
+                  ))}
+                  {turns.length === 0 && <li className="rv-muted flex items-center gap-2"><span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> Waiting for your partner to speak…</li>}
+                </ol>
+                <p className="sr-only" aria-live="polite">{latestTurn?.endOfTurn ? `Partner said: ${latestTurn.text}` : ''}</p>
+              </section>
+            )}
+
+            {prefs.aiSuggestions && session && (
+              <Suggestions
+                set={set}
+                pending={pending}
+                stale={stale}
+                loading={suggLoading}
+                error={suggError}
+                passport={set ? { turnId: set.turn.turnId, revision: set.turn.revision, final: set.status === 'final' } : null}
+                onEngage={() => { engagedRef.current = true }}
+                onUse={useCandidate}
+                onAcceptPending={acceptPending}
+                onFeedback={(c, verdict) => void db.feedback.add({ id: randomId(8), at: Date.now(), intent: c.intent, verdict, edited: false })}
+                onRegenerate={regenerate}
+                preferredIntent={prefs.preferredIntent}
+                setPreferredIntent={(s) => update({ preferredIntent: s })}
+              />
+            )}
+
+            {/* ------------------------------------------------ active rail view */}
+            <div id={`panel-${tab}`} tabIndex={-1} className="grid gap-4 outline-none" aria-label={RAIL.find(([k]) => k === tab)?.[1]}>
+              {tab === 'session' && (
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
+                  <section id="session-panel" aria-labelledby="session-h" className="rv-glass rv-enter grid content-start gap-4 p-4 sm:p-5">
+                    <header>
+                      <p className="rv-eyebrow">Explicit · bounded · billed by connected time</p>
+                      <h2 id="session-h" className="rv-section-title flex items-center gap-2"><Icon name="headphones" size={17} /> Listening session</h2>
+                    </header>
+                    <p className="rv-muted text-sm">Listening is always explicit, bounded ({status?.budget.limits?.assembly.interactiveSessionMinutes ?? 20} min max), and billed by connected time — pausing disconnects transcription. Your partner must know they are being transcribed.</p>
+                    {!session ? (
+                      <>
+                        <fieldset className="grid gap-2">
+                          <legend className="sr-only">Conversation mode</legend>
+                          {MODES.map(([k, l, d, icon]) => (
+                            <label key={k} className="rv-mode">
+                              <input type="radio" name="mode" checked={mode === k} onChange={() => setMode(k)} disabled={!status?.providers.livekit && k !== 'tabletop'} />
+                              <span className="grid gap-0.5">
+                                <span className="flex items-center gap-2 font-bold"><Icon name={icon} size={15} /> {l}</span>
+                                <span className="rv-muted text-xs">{d}</span>
+                              </span>
+                            </label>
+                          ))}
+                        </fieldset>
+                        <button data-scan className="rv-btn rv-btn-primary" onClick={startSession} disabled={!online || !listenAvailable}>
+                          <Icon name="headphones" size={17} /> Start listening
+                        </button>
+                        {status && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
+                      </>
+                    ) : (
+                      <>
+                        <p className="flex flex-wrap items-center gap-2 text-sm">
+                          <span className="rv-badge rv-badge-brand">State: {listening}</span>
+                          <span className="rv-badge">{session.kind === 'livekit' ? 'LiveKit worker' : 'direct (trusted demo)'}</span>
+                          <span className="rv-badge"><Icon name="clock" size={13} /> ends automatically after {session.maxMinutes} min</span>
+                        </p>
+                        {inviteUrl && (
+                          <div className="grid gap-1">
+                            <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (expires in 30 min)</label>
+                            <div className="flex gap-2">
+                              <input id="invite-url" className="rv-input flex-1 text-sm" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} />
+                              <button className="rv-btn" onClick={() => void navigator.clipboard?.writeText(inviteUrl)}><Icon name="copy" size={15} /> Copy</button>
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex flex-wrap gap-2">
+                          <button data-scan className="rv-btn" onClick={togglePause}>
+                            <Icon name={listening === 'paused' ? 'play' : 'pause'} size={15} />
+                            {listening === 'paused' ? 'Resume listening' : session.kind === 'direct' ? 'Pause (disconnects)' : 'Pause listening'}
+                          </button>
+                          <button data-scan className="rv-btn rv-btn-danger" onClick={() => void endSession('user')}>End session</button>
+                        </div>
+                        {session.kind === 'livekit' && status?.providers.phoneInbound && <PhonePanel active={!!session} />}
+                      </>
+                    )}
+                  </section>
+                  <PhraseBoards onPick={(text, o) => { setComposer(text); setComposerSource(null); setSourceStale(null); speech?.edit(text); if (o.cacheable) void doSpeak(text, { cacheable: true }) }} cacheAllowed={isLibraryVoice(voice.id)} />
+                </div>
+              )}
+              {tab === 'voice' && <VoiceWardrobe voiceId={prefs.voiceId} outputLanguage={prefs.outputLanguage} region={region} onSelect={(id) => update({ voiceId: id })} onVoicesChanged={reloadClones} />}
+              {tab === 'settings' && (
+                <div className="grid gap-4">
+                  <SettingsPanel prefs={prefs} update={update} />
+                  <label className="rv-glass grid gap-2 p-4 text-sm font-semibold sm:p-5">
+                    <span className="flex items-center gap-2"><Icon name="hand" size={16} /> “Hold My Turn” phrase (spoken exactly as written when you press it)</span>
+                    <input className="rv-input font-normal" maxLength={120} value={prefs.holdTurnPhrase} onChange={(e) => update({ holdTurnPhrase: e.target.value || 'I have something to add.' })} />
+                  </label>
+                </div>
+              )}
+              {tab === 'bank' && <MessageBank />}
+              {tab === 'privacy' && <PrivacyPanel />}
+              {tab === 'metrics' && (<div className="grid gap-4"><MetricsPanel status={status} />{status?.identity.kind === 'supabase' && <ReconcilePanel />}</div>)}
+            </div>
+          </div>
+
+          <footer className="rv-muted mx-auto mt-8 max-w-3xl text-center text-xs">
+            ReVOICE is an assistive-communication prototype, not a medical device. Do not use with real health information. AI suggestions are drafts; nothing is spoken without your approval of the exact words.
+          </footer>
+        </main>
       </div>
 
-      <footer className="rv-muted text-xs">
-        ReVOICE is an assistive-communication prototype, not a medical device. Do not use with real health information. AI suggestions are drafts; nothing is spoken without your approval of the exact words.
-      </footer>
-
       {/* ------------------------------------------------ always-visible Stop */}
-      <div className="fixed inset-x-0 bottom-0 z-40 flex justify-center gap-2 p-3" style={{ background: 'linear-gradient(transparent, var(--bg) 35%)' }}>
-        <button id="stop-button" data-scan className="rv-btn rv-btn-danger w-full max-w-xl text-2xl" style={{ minHeight: 'calc(var(--target) * 1.4)' }} onClick={stop} aria-label="Stop speaking now (Escape)">
-          ■ STOP {speaking ? '— speaking' : holding ? '— cancel held message' : ''}
+      <div className="rv-stop-dock fixed inset-x-0 bottom-0 z-40 flex justify-center p-3 pt-8">
+        <button
+          id="stop-button"
+          data-scan
+          className={`rv-btn rv-btn-danger rv-stop w-full max-w-xl text-xl ${speaking || holding ? 'is-live' : ''}`}
+          style={{ minHeight: 'calc(var(--target) * 1.35)' }}
+          onClick={stop}
+          aria-label="Stop speaking now (Escape)"
+        >
+          <Icon name="stop" size={20} /> STOP {speaking ? '— speaking' : holding ? '— cancel held message' : ''}
         </button>
       </div>
 
       {largeText && (
-        <div role="dialog" aria-modal="true" aria-label="Large text for your partner" className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-6 p-6" style={{ background: 'var(--bg)' }} onClick={() => setLargeText(false)}>
-          <p className="max-w-5xl text-center font-bold leading-tight" style={{ fontSize: 'clamp(2rem, 7vw, 6rem)' }}>{composer.trim() || lastSpoken}</p>
-          <button className="rv-btn" autoFocus onClick={() => setLargeText(false)}>Close (Esc)</button>
+        <div role="dialog" aria-modal="true" aria-label="Large text for your partner" className="rv-overlay rv-pop fixed inset-0 z-50 flex flex-col items-center justify-center gap-8 p-6" onClick={() => setLargeText(false)}>
+          <Orb state={speaking ? 'speaking' : 'idle'} size={72} reflection={false} />
+          <p className="max-w-5xl text-center font-extrabold leading-tight tracking-tight" style={{ fontSize: 'clamp(2rem, 7vw, 6rem)' }}>{composer.trim() || lastSpoken}</p>
+          <button className="rv-btn" autoFocus onClick={() => setLargeText(false)}><Icon name="x" size={16} /> Close (Esc)</button>
         </div>
       )}
-    </main>
+    </div>
   )
 }
 
+const RAIL: [Tab, string, IconName][] = [
+  ['session', 'Converse', 'sparkle'],
+  ['voice', 'Voice wardrobe', 'voice'],
+  ['settings', 'Settings', 'settings'],
+  ['bank', 'Message bank', 'bank'],
+  ['privacy', 'Privacy & data', 'shield'],
+  ['metrics', 'Measurements', 'chart'],
+]
+const MODES: [Mode, string, string, IconName][] = [
+  ['tabletop', 'Tabletop', 'This device hears your partner and plays your voice.', 'mic'],
+  ['partner-link', 'Partner link', 'Partner joins on their phone with a link; cleaner audio separation.', 'link'],
+  ['remote', 'Remote call', 'Browser call with a remote partner.', 'globe'],
+]
+
 function AuthControls({ needsSignIn, status }: { needsSignIn: boolean; status: StatusResponse | null }) {
   const sb = getSupabase()
-  if (!sb) return null
+  if (!sb) return <span className="rv-badge"><Icon name="user" size={13} /> Local prototype</span>
   if (needsSignIn) {
     return (
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="rv-muted">Sign in for voice & suggestions (typing and phrases work without it):</span>
-        <button className="rv-btn" onClick={() => void signInWithOAuth('github')}>GitHub</button>
-        <button className="rv-btn" onClick={() => void signInWithOAuth('google')}>Google</button>
+        <button className="rv-btn" onClick={() => void signInWithOAuth('github')}><Icon name="plus" size={15} /> GitHub</button>
+        <button className="rv-btn" onClick={() => void signInWithOAuth('google')}><Icon name="plus" size={15} /> Google</button>
       </div>
     )
   }
-  return status?.identity.kind === 'supabase' ? <button className="rv-btn text-sm" onClick={() => void sb.auth.signOut()}>Sign out</button> : null
+  return status?.identity.kind === 'supabase' ? <button className="rv-btn text-sm" onClick={() => void sb.auth.signOut()}><Icon name="logout" size={15} /> Sign out</button> : null
 }

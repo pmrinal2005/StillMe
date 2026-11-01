@@ -27,6 +27,8 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 | Vitest: 77 tests across 9 suites | ✅ all passing |
 | Build-time secret scan (fails the build on a leak) | ✅ |
 | axe-core WCAG 2.1 AA + best-practice: home, join, dark/reduced-motion, mobile | ✅ 0 violations |
+| **Frontend rebuilt (v2 "iridescent glass")**: side rail, animated liquid orb that mirrors listening/drafting/speaking/holding states, quick-action chips, iridescent composer, glass suggestion cards with shimmer while drafting, caption bubbles, tile phrase boards, glass partner join page | ✅ logic unchanged; axe 0 violations on 11 page/mode/viewport cases |
+| `vercel.json` for Vercel deployment | ✅ |
 | Live provider smoke test (real AssemblyAI/Groq/LiveKit calls) | ⏳ needs your keys; capped at $2 |
 | Usability sessions with consenting non-clinical volunteers | ⏳ not started |
 
@@ -99,6 +101,16 @@ pytest -q                         # 37 tests, no network
 # Deploy to LiveKit Cloud Build using worker/Dockerfile; set worker/.env.example values as secrets.
 ```
 
+### Frontend design system (v2)
+- `src/app/globals.css`: tokens (pastel mesh backdrop, frosted glass, iridescent conic border, orb, chips, tiles, bubbles), all inside `@layer components` so Tailwind utilities still win.
+- `src/components/ui/Orb.tsx` (CSS-only liquid orb, `Backdrop`, `Logo`), `src/components/ui/Icon.tsx` (inline SVG icons, so there is no icon CDN and it works offline).
+- The orb is decorative (`aria-hidden`). Every state also has a text label in the status pills and an `aria-live` caption.
+- High contrast (`data-contrast="high"`) swaps all glass for solid black and white with yellow focus. Reduced motion (OS setting or app setting) stops all animation.
+- The `--target` and `--text-scale` settings still control every button, chip, tile and rail button.
+
+### Vercel
+`vercel.json` pins the framework (`nextjs`), `npm ci`, `npm run build` (so the secret scan runs on every deploy), the `iad1` region, a 60 s max duration for API routes (within the Hobby limit), `no-store` on `/api/*`, and correct headers for `sw.js` and the manifest. Import the GitHub repo in Vercel, add the env vars from `.env.example` in Project Settings → Environment Variables, and deploy. The Python worker does **not** run on Vercel; it runs on LiveKit Cloud.
+
 ### Deployment sequence
 1. Configure a free OAuth provider in Supabase. Do not rely on default SMTP (limited to 2 emails/hour, team addresses only).
 2. Apply `supabase/migrations/*.sql`.
@@ -155,4 +167,4 @@ pytest -q                         # 37 tests, no network
 3. Playwright end-to-end tests in CI (axe is already clean) and screen-reader passes on iOS and Android.
 4. Symbol-supported and simplified-language views after individual testing.
 
-_Last updated: 2026-11-01._
+_Last updated: 2026-11-01 (frontend v2 rebuild, vercel.json)._

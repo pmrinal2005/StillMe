@@ -1,19 +1,35 @@
 'use client'
 import type { StatusResponse } from '@/lib/client/api'
 import { OUTPUT_LABELS, type OutputState } from '@/lib/output-state'
+import { Icon } from './ui/Icon'
 
-function Dot({ ok, label }: { ok: boolean | 'warn'; label: string }) {
-  const color = ok === 'warn' ? 'var(--warn)' : ok ? 'var(--ok)' : 'var(--danger)'
+function Pill({ ok, label }: { ok: boolean | 'warn'; label: string }) {
+  const cls = ok === 'warn' ? 'rv-badge rv-badge-warn' : ok ? 'rv-badge rv-badge-ok' : 'rv-badge rv-badge-danger'
   return (
-    <span className="rv-badge">
-      <span className="rv-dot" style={{ background: color }} aria-hidden="true" />
+    <li className={cls}>
+      <span className="rv-dot" style={{ background: 'currentColor' }} aria-hidden="true" />
       {label}
       <span className="sr-only">{ok === 'warn' ? ' (limited)' : ok ? ' (available)' : ' (unavailable)'}</span>
-    </span>
+    </li>
   )
 }
 
-/** Always-visible connection, voice-consent and budget status. Color is never the only signal. */
+function Meter({ label, used, limit, unit }: { label: string; used: number; limit: number; unit?: string }) {
+  const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0
+  return (
+    <div className="grid gap-1">
+      <div className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="rv-muted font-semibold">{label}</span>
+        <span className="font-bold tabular-nums">{unit === '$' ? `$${used.toFixed(3)} / $${limit}` : `${used} / ${limit}${unit ? ` ${unit}` : ''}`}</span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full" style={{ background: 'rgba(90,70,140,.12)' }} role="progressbar" aria-label={label} aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: pct > 85 ? 'var(--danger)' : 'linear-gradient(90deg, var(--pink-deep), var(--violet))', transition: 'width .6s ease' }} />
+      </div>
+    </div>
+  )
+}
+
+/** Always-visible connection, voice-consent and budget status. Colour is never the only signal (text + sr labels). */
 export function StatusBar(props: {
   status: StatusResponse | null
   online: boolean
@@ -26,22 +42,39 @@ export function StatusBar(props: {
   const p = status?.providers
   const b = status?.budget.user
   return (
-    <section id="status-bar" aria-label="System status" className="rv-panel flex flex-wrap items-center gap-2 p-3 text-sm">
-      <Dot ok={online} label={online ? 'Online' : 'Offline — local phrases and device voice only'} />
-      <Dot ok={!!p?.assemblyai} label={p?.assemblyai ? 'Voice service' : 'Voice service not configured'} />
-      <Dot ok={p?.groq ? true : 'warn'} label={p?.groq ? 'Suggestions' : 'Suggestions off'} />
-      <Dot ok={p?.livekit || p?.browserStt ? true : 'warn'} label={p?.livekit ? 'Listening (LiveKit)' : p?.browserStt ? 'Listening (direct demo)' : 'Listening unavailable'} />
-      <span className="rv-badge" aria-live="polite">Listening: {listening}</span>
-      <span className="rv-badge" aria-live="polite">Output: {OUTPUT_LABELS[output.kind]}</span>
-      <span className="rv-badge">Voice: {voiceLabel}</span>
-      {voiceWarning && <span className="rv-badge" style={{ borderColor: 'var(--warn)' }} role="status">⚠ {voiceWarning}</span>}
+    <section id="status-bar" aria-label="System status" className="grid gap-2">
+      <ul className="flex flex-wrap items-center gap-1.5 text-sm" role="list">
+        <Pill ok={online} label={online ? 'Online' : 'Offline — local phrases & device voice'} />
+        <Pill ok={!!p?.assemblyai} label={p?.assemblyai ? 'Voice service' : 'Voice service not configured'} />
+        <Pill ok={p?.groq ? true : 'warn'} label={p?.groq ? 'Suggestions' : 'Suggestions off'} />
+        <Pill ok={p?.livekit || p?.browserStt ? true : 'warn'} label={p?.livekit ? 'Listening (LiveKit)' : p?.browserStt ? 'Listening (direct demo)' : 'Listening unavailable'} />
+        <li className="rv-badge" aria-live="polite">
+          {listening === 'listening' ? <span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> : <Icon name="headphones" size={13} />}
+          Listening: {listening}
+        </li>
+        <li className={`rv-badge ${output.kind === 'speaking' ? 'rv-badge-brand' : ''}`} aria-live="polite">
+          {output.kind === 'speaking' ? <span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> : <Icon name="voice" size={13} />}
+          Output: {OUTPUT_LABELS[output.kind]}
+        </li>
+        <li className="rv-badge hidden sm:inline-flex"><Icon name="user" size={13} />Voice: {voiceLabel}</li>
+        {voiceWarning && <li className="rv-badge rv-badge-warn" role="status"><Icon name="alert" size={13} />{voiceWarning}</li>}
+        {status?.identity.kind === 'local-demo' && <li className="rv-badge rv-badge-warn">Local prototype identity (Supabase not configured)</li>}
+        {status && !status.providers.durableStore && <li className="rv-badge hidden md:inline-flex">Single-instance stores</li>}
+      </ul>
       {b && (
-        <span className="rv-badge" title="Application budget ledger (estimates; reconcile with provider dashboards)">
-          Today: {b.tts.chars}/{b.tts.charsLimit} chars · {b.stt.minutes}/{b.stt.minutesLimit} listen min · {b.groq.requests}/{b.groq.requestsLimit} suggestions · ${b.usd.today.toFixed(3)}/${b.usd.todayLimit}
-        </span>
+        <details className="rv-glass px-4 py-2 text-sm">
+          <summary className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-1 font-semibold">
+            <span className="flex items-center gap-2 whitespace-nowrap"><Icon name="chart" size={15} /> Today’s budget <span className="rv-muted font-normal">· ${b.usd.today.toFixed(3)} of ${b.usd.todayLimit}</span></span>
+            <span className="rv-muted hidden text-xs sm:inline">estimates — reconcile with provider dashboards</span>
+          </summary>
+          <div className="grid gap-3 py-2 sm:grid-cols-4">
+            <Meter label="Voice characters" used={b.tts.chars} limit={b.tts.charsLimit} />
+            <Meter label="Listening minutes" used={b.stt.minutes} limit={b.stt.minutesLimit} unit="min" />
+            <Meter label="Suggestions" used={b.groq.requests} limit={b.groq.requestsLimit} />
+            <Meter label="Spend today" used={b.usd.today} limit={b.usd.todayLimit} unit="$" />
+          </div>
+        </details>
       )}
-      {status?.identity.kind === 'local-demo' && <span className="rv-badge" style={{ borderColor: 'var(--warn)' }}>Local prototype identity (Supabase not configured)</span>}
-      {status && !status.providers.durableStore && <span className="rv-badge rv-muted">Single-instance stores</span>}
     </section>
   )
 }

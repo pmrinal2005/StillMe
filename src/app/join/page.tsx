@@ -10,6 +10,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Room, RoomEvent, Track, type RemoteParticipant } from 'livekit-client'
 import { DataTopics, PresenceMessage } from '@/lib/contracts'
+import { Icon } from '@/components/ui/Icon'
+import { Backdrop, Logo, Orb, type OrbState } from '@/components/ui/Orb'
 
 type Phase = 'consent' | 'joining' | 'joined' | 'ended' | 'error'
 const dec = new TextDecoder()
@@ -98,58 +100,76 @@ export default function JoinPage() {
     setPhase('ended')
   }
 
+  const orbState: OrbState = phase !== 'joined' ? 'idle' : voiceSpeaking ? 'speaking' : holdTurn ? 'holding' : composing ? 'drafting' : 'listening'
   return (
-    <main id="partner-join" className="mx-auto grid max-w-2xl gap-4 p-4 sm:p-8">
-      <h1 className="text-2xl font-extrabold">Join a ReVOICE conversation</h1>
-
-      {(phase === 'consent' || phase === 'error' || phase === 'joining') && (
-        <section aria-labelledby="disclosure-h" className="rv-panel grid gap-3 p-4">
-          <h2 id="disclosure-h" className="text-lg font-bold">Before you join</h2>
-          <ul className="ml-5 list-disc text-sm">
-            <li>The person you are talking with uses ReVOICE to communicate. Your speech will be <strong>transcribed live</strong> (by AssemblyAI) so they can read it and prepare replies.</li>
-            <li>AI may draft reply options for them (Groq). <strong>They approve every word</strong> before anything is spoken.</li>
-            <li>Their replies are spoken by a <strong>synthetic voice</strong>, which may be a clone of their own voice used with their consent.</li>
-            <li>ReVOICE does not record audio or save transcripts. The link expires in 30 minutes.</li>
-            <li>This is not an emergency service.</li>
-          </ul>
-          {!invite && <p role="alert" style={{ color: 'var(--warn)' }}>This page needs an invitation link.</p>}
-          <label className="grid text-sm">Your name (optional, shown to them)
-            <input className="rv-input" maxLength={40} value={label} onChange={(e) => setLabel(e.target.value)} />
-          </label>
-          <label className="flex gap-2"><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I understand and agree to my speech being transcribed for this conversation.</label>
-          {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
-          <button className="rv-btn rv-btn-primary text-xl" disabled={!consent || !invite || phase === 'joining'} onClick={join}>
-            {phase === 'joining' ? 'Joining…' : 'Join with microphone'}
-          </button>
-        </section>
-      )}
-
-      {phase === 'joined' && (
-        <section aria-labelledby="coach-h" className="rv-panel grid gap-4 p-6 text-center">
-          <h2 id="coach-h" className="sr-only">Conversation status</h2>
-          <div aria-live="polite" className="text-2xl font-bold" style={{ minHeight: '4rem' }}>
-            {voiceSpeaking ? '🔊 They are speaking…'
-              : holdTurn ? '✋ They have something to add — please pause.'
-                : composing ? '✍️ They are composing a reply…'
-                  : '🎧 Listening'}
+    <div className="relative min-h-screen">
+      <Backdrop />
+      <main id="partner-join" className="mx-auto grid max-w-2xl gap-5 p-4 sm:p-8">
+        <header className="rv-enter flex items-center gap-3">
+          <Logo />
+          <div>
+            <p className="text-lg font-extrabold tracking-tight">ReVOICE</p>
+            <p className="rv-muted text-xs font-semibold">Partner view</p>
           </div>
-          <div className="rv-muted grid gap-1 text-sm">
-            <p>Tips: speak naturally, then pause. Give them time to compose — replies can take a little longer.</p>
-            <p>Ask one question at a time. Yes/no questions are fine, but they may choose another answer.</p>
-            <p>If you change your mind mid-sentence (“actually, not Tuesday…”), their draft suggestions update.</p>
-          </div>
-          <div className="flex justify-center gap-2">
-            <button className="rv-btn" aria-pressed={muted} onClick={toggleMute}>{muted ? '🎙 Unmute' : '🔇 Mute me'}</button>
-            <button className="rv-btn rv-btn-danger" onClick={leave}>Leave</button>
-          </div>
-        </section>
-      )}
+        </header>
+        <div className="rv-enter rv-enter-d1 grid justify-items-center gap-6 py-4 text-center">
+          <h1 className="rv-hero-title">Join a <span className="rv-gradient-text">ReVOICE</span> conversation</h1>
+          <Orb state={orbState} size={phase === 'joined' ? 170 : 120} reflection={phase === 'joined'} />
+        </div>
 
-      {phase === 'ended' && (
-        <section className="rv-panel p-4">
-          <p>You have left the conversation. You can close this page.</p>
-        </section>
-      )}
-    </main>
+        {(phase === 'consent' || phase === 'error' || phase === 'joining') && (
+          <section aria-labelledby="disclosure-h" className="rv-canvas rv-enter rv-enter-d2 grid gap-4 p-5 sm:p-7">
+            <h2 id="disclosure-h" className="rv-section-title">Before you join</h2>
+            <ul className="grid gap-2 text-sm">
+              {[
+                <>The person you are talking with uses ReVOICE to communicate. Your speech will be <strong>transcribed live</strong> (by AssemblyAI) so they can read it and prepare replies.</>,
+                <>AI may draft reply options for them (Groq). <strong>They approve every word</strong> before anything is spoken.</>,
+                <>Their replies are spoken by a <strong>synthetic voice</strong>, which may be a clone of their own voice used with their consent.</>,
+                <>ReVOICE does not record audio or save transcripts. The link expires in 30 minutes.</>,
+                <>This is not an emergency service.</>,
+              ].map((t, i) => (
+                <li key={i} className="flex gap-2"><span className="rv-badge rv-badge-brand h-6 shrink-0 px-2" aria-hidden="true">{i + 1}</span><span>{t}</span></li>
+              ))}
+            </ul>
+            {!invite && <p role="alert" className="rv-alert rv-alert-warn">This page needs an invitation link.</p>}
+            <label className="grid gap-1 text-sm font-semibold">Your name (optional, shown to them)
+              <input className="rv-input font-normal" maxLength={40} value={label} onChange={(e) => setLabel(e.target.value)} />
+            </label>
+            <label className="rv-mode text-sm"><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> <span>I understand and agree to my speech being transcribed for this conversation.</span></label>
+            {error && <p role="alert" className="rv-alert rv-alert-danger">{error}</p>}
+            <button className="rv-btn rv-btn-primary text-lg" disabled={!consent || !invite || phase === 'joining'} onClick={join}>
+              <Icon name="mic" size={18} /> {phase === 'joining' ? 'Joining…' : 'Join with microphone'}
+            </button>
+          </section>
+        )}
+
+        {phase === 'joined' && (
+          <section aria-labelledby="coach-h" className="rv-canvas rv-enter grid gap-5 p-6 text-center sm:p-8">
+            <h2 id="coach-h" className="sr-only">Conversation status</h2>
+            <div aria-live="polite" className="flex items-center justify-center gap-3 text-2xl font-extrabold tracking-tight" style={{ minHeight: '4rem' }}>
+              {voiceSpeaking ? <><span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> They are speaking…</>
+                : holdTurn ? <><Icon name="hand" size={26} /> They have something to add — please pause.</>
+                  : composing ? <><Icon name="edit" size={24} /> They are composing a reply…</>
+                    : <><Icon name="headphones" size={24} /> Listening</>}
+            </div>
+            <ul className="grid gap-2 text-left text-sm sm:grid-cols-3">
+              <li className="rv-panel p-3"><strong className="block">Speak, then pause</strong><span className="rv-muted">Give them time to compose — replies can take a little longer.</span></li>
+              <li className="rv-panel p-3"><strong className="block">One question at a time</strong><span className="rv-muted">Yes/no is fine, but they may choose another answer.</span></li>
+              <li className="rv-panel p-3"><strong className="block">Corrections are OK</strong><span className="rv-muted">If you change your mind mid-sentence, their drafts update.</span></li>
+            </ul>
+            <div className="flex justify-center gap-2">
+              <button className="rv-btn" aria-pressed={muted} onClick={toggleMute}><Icon name="mic" size={16} /> {muted ? 'Unmute' : 'Mute me'}</button>
+              <button className="rv-btn rv-btn-danger" onClick={leave}><Icon name="logout" size={16} /> Leave</button>
+            </div>
+          </section>
+        )}
+
+        {phase === 'ended' && (
+          <section className="rv-canvas rv-pop p-6 text-center">
+            <p className="text-lg font-semibold">You have left the conversation. You can close this page.</p>
+          </section>
+        )}
+      </main>
+    </div>
   )
 }

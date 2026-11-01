@@ -62,19 +62,19 @@ export function VoiceWardrobe(props: {
   }
 
   return (
-    <section id="voice-wardrobe" aria-labelledby="voice-h" className="rv-panel p-4">
-      <h2 id="voice-h" className="mb-2 text-lg font-bold">Voice wardrobe</h2>
+    <section id="voice-wardrobe" aria-labelledby="voice-h" className="rv-glass rv-enter p-4 sm:p-6">
+      <h2 id="voice-h" className="rv-section-title mb-2">Voice wardrobe</h2>
       <p className="rv-muted mb-3 text-sm">
         All voices are synthetic. Changing voice or language starts a newly configured voice connection. There are no pitch, speed, or emotion controls — use your style card for writing style.
       </p>
-      {msg && <p role="status" className="mb-2 text-sm" style={{ color: 'var(--ok)' }}>{msg}</p>}
+      {msg && <p role="status" className="mb-2 text-sm rv-text-ok">{msg}</p>}
 
       <fieldset className="mb-4">
         <legend className="mb-1 font-semibold">Library voices ({OUTPUT_LANGUAGE_LABELS[outputLanguage]})</legend>
         {libraryForLang.length === 0 && <p className="rv-muted text-sm">No library voice is listed for this language yet; any listed voice can be tried, quality may vary.</p>}
         <div className="grid gap-2 sm:grid-cols-2">
           {(libraryForLang.length ? libraryForLang : LIBRARY_VOICES).map((v) => (
-            <label key={v.id} className="rv-btn justify-start text-left text-sm">
+            <label key={v.id} className="rv-mode text-sm">
               <input type="radio" name="voice" checked={voiceId === v.id} onChange={() => props.onSelect(v.id)} />
               <span><strong>{v.name}</strong> <span className="rv-muted">— {v.description}</span></span>
             </label>
@@ -90,10 +90,10 @@ export function VoiceWardrobe(props: {
             const u = clonedVoiceUsable(v, region)
             const exp = consentExpiry(v)
             return (
-              <li key={v.id} className="rv-panel p-3" style={{ background: 'var(--panel-2)' }} aria-label={`Voice Identity Card: ${v.label}`}>
+              <li key={v.id} className="rv-panel p-4" aria-label={`Voice Identity Card: ${v.label}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <strong>{v.label}</strong>
-                  <span className="rv-badge" style={{ borderColor: u.ok ? (u.remindRenewal ? 'var(--warn)' : 'var(--ok)') : 'var(--danger)' }}>
+                  <span className={`rv-badge ${u.ok ? (u.remindRenewal ? 'rv-badge-warn' : 'rv-badge-ok') : 'rv-badge-danger'}`}>
                     {u.ok ? (u.remindRenewal ? `Renew soon — ${daysLeft(exp)} days left` : 'Usable') : `Disabled: ${u.reason.replace(/_/g, ' ')}`}
                   </span>
                 </div>
@@ -137,7 +137,7 @@ export function VoiceWardrobe(props: {
         </details>
       )}
       {!isLibraryVoice(voiceId) && !clones.some((c) => c.voiceId === voiceId) && (
-        <p role="alert" className="mt-2 text-sm" style={{ color: 'var(--warn)' }}>The selected voice is not registered on this device; select a library voice.</p>
+        <p role="alert" className="rv-alert rv-alert-warn mt-2 text-sm">The selected voice is not registered on this device; select a library voice.</p>
       )}
     </section>
   )
@@ -167,10 +167,10 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
   }
 
   return (
-    <div className="rv-panel mt-3 grid gap-3 p-3" role="group" aria-label="Cloned voice registration">
-      <ol className="rv-muted flex gap-3 text-sm" aria-label="Steps">
+    <div className="rv-panel mt-3 grid gap-3 p-4" role="group" aria-label="Cloned voice registration">
+      <ol className="flex flex-wrap gap-2 text-sm" aria-label="Steps">
         {['Create in dashboard', 'Provenance', 'Consent', 'Register & check'].map((s, i) => (
-          <li key={s} aria-current={step === i + 1 ? 'step' : undefined} style={step === i + 1 ? { color: 'var(--fg)', fontWeight: 700 } : {}}>{i + 1}. {s}</li>
+          <li key={s} aria-current={step === i + 1 ? 'step' : undefined} className={step === i + 1 ? 'rv-badge rv-badge-brand' : 'rv-badge'}>{i + 1}. {s}</li>
         ))}
       </ol>
       {step === 1 && (
@@ -225,7 +225,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
             </select>
           </label>
           <label className="flex gap-2"><input type="checkbox" checked={f.qualityChecked} onChange={(e) => set({ qualityChecked: e.target.checked })} /> The owner listened to a sample in the dashboard and approves its quality.</label>
-          {err && <p role="alert" style={{ color: 'var(--danger)' }}>{err}</p>}
+          {err && <p role="alert" className="rv-text-danger">{err}</p>}
           <div className="flex gap-2"><button className="rv-btn" onClick={() => setStep(3)}>Back</button><button className="rv-btn rv-btn-primary" onClick={save}>Register voice</button></div>
         </div>
       )}
@@ -260,7 +260,7 @@ function RenewForm({ voice, onDone }: { voice: ClonedVoiceProfile; onDone: (msg:
       <label className="grid">Type exactly: <code>{RENEW_AFFIRMATION}</code>
         <input className="rv-input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
       </label>
-      {err && <p role="alert" style={{ color: 'var(--danger)' }}>{err}</p>}
+      {err && <p role="alert" className="rv-text-danger">{err}</p>}
       <button className="rv-btn rv-btn-primary" disabled={busy || !owner || typed !== RENEW_AFFIRMATION} onClick={submit}>Renew consent</button>
       <p className="rv-muted">Renewal sends one tiny (billed) synthesis request with the provider’s documented renewal flag.</p>
     </div>

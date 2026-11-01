@@ -9,11 +9,16 @@ export const metadata: Metadata = {
   applicationName: 'ReVOICE',
 }
 
-export const viewport: Viewport = { themeColor: '#0b1020', width: 'device-width', initialScale: 1 }
+export const viewport: Viewport = { themeColor: '#f6f3fb', width: 'device-width', initialScale: 1 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+        <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+      </head>
       <body className="min-h-screen antialiased">
         <nav aria-label="Skip links">
           <a href="#composer-input" className="sr-only-focusable rv-btn absolute left-2 top-2 z-50">Skip to message composer</a>

@@ -14,10 +14,10 @@ export function MetricsPanel({ status }: { status: StatusResponse | null }) {
   const usd = status?.budget.user.usd.today ?? 0
   const aiTotal = c.aiApproved + c.aiRejected
   return (
-    <section id="metrics-panel" aria-labelledby="metrics-h" className="rv-panel p-4 text-sm">
-      <h2 id="metrics-h" className="mb-2 text-lg font-bold">Session measurements</h2>
+    <section id="metrics-panel" aria-labelledby="metrics-h" className="rv-glass rv-enter p-4 text-sm sm:p-6">
+      <h2 id="metrics-h" className="rv-section-title mb-2">Session measurements</h2>
       <p className="rv-muted mb-2">Measured on this device. Engineering targets, not guarantees: warm approval→audio p50 &lt; 500 ms, p95 &lt; 1.2 s; Stop &lt; 150 ms.</p>
-      <table className="w-full text-left">
+      <table className="rv-table">
         <caption className="sr-only">Latency intervals</caption>
         <thead><tr><th>Interval</th><th>n</th><th>p50 ms</th><th>p95 ms</th></tr></thead>
         <tbody>

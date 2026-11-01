@@ -45,8 +45,8 @@ export function PrivacyPanel() {
   }
 
   return (
-    <section id="privacy-panel" aria-labelledby="privacy-h" className="rv-panel grid gap-3 p-4 text-sm">
-      <h2 id="privacy-h" className="text-lg font-bold">Privacy & data</h2>
+    <section id="privacy-panel" aria-labelledby="privacy-h" className="rv-glass rv-enter grid gap-3 p-4 text-sm sm:p-6">
+      <h2 id="privacy-h" className="rv-section-title">Privacy & data</h2>
       <ul className="ml-5 list-disc">
         <li>No audio recording by ReVOICE. No saved transcripts. Live captions and suggestions live in memory only.</li>
         <li>No raw-content logging or analytics: server logs contain only counts, durations, request IDs and error categories.</li>
@@ -59,7 +59,7 @@ export function PrivacyPanel() {
         <button className="rv-btn" onClick={doExport}>Export my data (JSON)</button>
         <button className="rv-btn rv-btn-danger" onClick={doDelete}>Delete my data…</button>
       </div>
-      {msg && <p role="status" style={{ color: 'var(--ok)' }}>{msg}</p>}
+      {msg && <p role="status" className="rv-text-ok">{msg}</p>}
       {actions.length > 0 && (
         <div role="note">
           <p className="font-semibold">Deleting ReVOICE data does not delete data held by third parties:</p>
