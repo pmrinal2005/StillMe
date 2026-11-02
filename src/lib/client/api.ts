@@ -29,11 +29,20 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** B4: signed session ticket from /api/livekit/session, presented on session-scoped requests. */
+let sessionTicket: string | null = null
+export function setSessionTicket(t: string | null) {
+  sessionTicket = t
+}
+export const getSessionTicket = () => sessionTicket
+const ticketHeader = (): Record<string, string> => (sessionTicket ? { 'x-revoice-session': sessionTicket } : {})
+
 export const api = {
   status: () => call<StatusResponse>('/api/status'),
   approve: (req: ApproveRequest, voice?: ClonedVoiceProfile) =>
     call<{ approval: Approval }>('/api/approve', {
       method: 'POST',
+      headers: req.roomName ? ticketHeader() : {},
       body: JSON.stringify({
         ...req,
         voice: voice && {
@@ -50,14 +59,18 @@ export const api = {
     }),
   suggest: (req: SuggestRequest, signal?: AbortSignal) => call<{ set: CandidateSet }>('/api/suggest', { method: 'POST', body: JSON.stringify(req), signal }),
   startSession: (b: { mode: string; voiceId: string; outputLanguage: string; inputLanguages: string[]; keyterms: string[]; contextPrompt?: string; minutes?: number; replace?: boolean }) =>
-    call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; maxSessionMinutes: number }>('/api/livekit/session', { method: 'POST', body: JSON.stringify(b) }),
-  endSession: (room: string, reason: 'user' | 'timeout' | 'budget' | 'idle' | 'error' = 'user') => call<{ ok: true }>('/api/livekit/end', { method: 'POST', body: JSON.stringify({ room, reason }) }),
+    call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; ticket: string; maxSessionMinutes: number }>('/api/livekit/session', {
+      method: 'POST',
+      body: JSON.stringify({ ...b, ticket: sessionTicket ?? undefined }),
+    }),
+  endSession: (room: string, reason: 'user' | 'timeout' | 'budget' | 'idle' | 'error' = 'user', ticket: string | null = sessionTicket) =>
+    call<{ ok: true; minutesUsed?: number }>('/api/livekit/end', { method: 'POST', body: JSON.stringify({ room, reason, ticket: ticket ?? undefined }) }),
   join: (invite: string, label: string) => call<{ url: string; token: string; identity: string; room: string }>('/api/livekit/join', { method: 'POST', body: JSON.stringify({ invite, label, consent: true }) }),
   sttToken: (b: { sampleRate: number; languageCodes: string[]; keyterms: string[]; minutes: number }) =>
     call<{ wsUrl: string; maxSessionSeconds: number }>('/api/stt-token', { method: 'POST', body: JSON.stringify(b) }),
   renewConsent: (voiceId: string, affirmation: string) =>
     call<{ ok: true; providerExpiresAt: number | null }>('/api/voices/renew', { method: 'POST', body: JSON.stringify({ voiceId, affirmation, speakerIsOwner: true }) }),
-  phonePair: () => call<{ code: string; expiresAt: number; number: string | null; maxCallMinutes: number; monthUsed: number; monthCap: number }>('/api/phone/pair', { method: 'POST', body: '{}' }),
+  phonePair: () => call<{ code: string; expiresAt: number; number: string | null; maxCallMinutes: number; monthUsed: number; monthCap: number }>('/api/phone/pair', { method: 'POST', body: '{}', headers: ticketHeader() }),
   phoneRevoke: () => call<{ ok: true }>('/api/phone/pair', { method: 'DELETE' }),
   reconcileGet: () => call<{ estimate: { source: string; assemblyaiUsd: number; phone: { month: string; minutesUsed: number; cap: number } }; recorded: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string; at: number }[]; assemblyai: { status: string; driftUsd: number | null } | null }>('/api/reconcile'),
   reconcilePost: (b: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note?: string }) => call<{ ok: true; result: { status: string; driftUsd: number | null } | null }>('/api/reconcile', { method: 'POST', body: JSON.stringify(b) }),

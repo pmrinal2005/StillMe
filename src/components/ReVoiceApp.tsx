@@ -25,7 +25,7 @@ import { PhonePanel } from './PhonePanel'
 import { ReconcilePanel } from './ReconcilePanel'
 import { Icon, type IconName } from './ui/Icon'
 import { Backdrop, Logo, Orb, type OrbState } from './ui/Orb'
-import { api, ApiError, type StatusResponse } from '@/lib/client/api'
+import { api, ApiError, getSessionTicket, setSessionTicket, type StatusResponse } from '@/lib/client/api'
 import { db, getCachedAudio, putCachedAudio } from '@/lib/client/db'
 import { PcmStreamPlayer } from '@/lib/client/pcm-player'
 import { SpeechController, type SpeakSource } from '@/lib/client/speech'
@@ -469,6 +469,7 @@ export function ReVoiceApp() {
     watchdog.current = null
     listenerRef.current = null
     sessionRef.current = null
+    setSessionTicket(null) // B4: ticket is only valid for the session it was issued for
     speech?.setRoom(null)
     setSession(null)
     setPartnerPresent(false)
@@ -519,6 +520,7 @@ export function ReVoiceApp() {
     try {
       if (st?.providers.livekit) {
         const r = await api.startSession({ mode, voiceId: voice.id, outputLanguage: prefs.outputLanguage, inputLanguages, keyterms: prefs.keyterms, contextPrompt: prefs.contextPrompt, replace: true })
+        setSessionTicket(r.ticket) // B4: signed ticket authorizes approve/end on ANY serverless instance
         trackerRef.current = new TurnTracker(r.conversationId, 0)
         callsPerTurn.current.clear()
         const l = new LiveKitListener(listenerEvents, { url: r.url, token: r.token, publishMic: mode === 'tabletop', playPartnerAudio: mode === 'remote' })
@@ -580,7 +582,7 @@ export function ReVoiceApp() {
     }, 30_000)
     const onUnload = () => {
       const s = sessionRef.current
-      if (s?.kind === 'livekit' && s.room) navigator.sendBeacon?.('/api/livekit/end', new Blob([JSON.stringify({ room: s.room, reason: 'idle' })], { type: 'application/json' }))
+      if (s?.kind === 'livekit' && s.room) navigator.sendBeacon?.('/api/livekit/end', new Blob([JSON.stringify({ room: s.room, reason: 'idle', ticket: getSessionTicket() ?? undefined })], { type: 'application/json' }))
     }
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('pagehide', onUnload)

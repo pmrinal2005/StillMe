@@ -4,6 +4,8 @@ Everything that could spend money or act without the user is OFF and not configu
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from dataclasses import dataclass
 
@@ -48,6 +50,31 @@ def _opt(name: str) -> str | None:
     return v or None
 
 
+# B2: MUST match src/lib/server/env.ts (APPROVAL_SECRET_LABEL / APPROVAL_SECRET_SOURCES / deriveApprovalSecret).
+APPROVAL_SECRET_LABEL = "revoice/approval-secret/v1"
+APPROVAL_SECRET_SOURCES = ("LIVEKIT_API_SECRET", "ASSEMBLYAI_API_KEY")
+
+
+def derive_approval_secret(provider_secret: str) -> str:
+    return hmac.new(provider_secret.encode("utf-8"), APPROVAL_SECRET_LABEL.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def resolve_approval_secret() -> tuple[str | None, str]:
+    """Same resolution order as the web app, so web and worker always agree on the HMAC secret.
+
+    1. REVOICE_APPROVAL_SECRET  2. derived from LIVEKIT_API_SECRET  3. derived from ASSEMBLYAI_API_KEY.
+    There is deliberately NO random fallback (a per-process secret could never verify web approvals).
+    """
+    explicit = _opt("REVOICE_APPROVAL_SECRET")
+    if explicit:
+        return explicit, "explicit"
+    for name in APPROVAL_SECRET_SOURCES:
+        v = _opt(name)
+        if v:
+            return derive_approval_secret(v), f"derived:{name}"
+    return None, "missing"
+
+
 @dataclass(frozen=True)
 class Env:
     assembly_key: str | None
@@ -72,7 +99,7 @@ def load_env() -> Env:
     return Env(
         assembly_key=_opt("ASSEMBLYAI_API_KEY"),
         region="eu" if _opt("ASSEMBLYAI_REGION") == "eu" else "us",
-        approval_secret=_opt("REVOICE_APPROVAL_SECRET"),
+        approval_secret=resolve_approval_secret()[0],
         agent_name=_opt("LIVEKIT_AGENT_NAME") or "revoice-worker",
         app_url=(_opt("REVOICE_APP_URL") or "").rstrip("/") or None,
         supabase_url=_opt("SUPABASE_URL") or _opt("NEXT_PUBLIC_SUPABASE_URL"),

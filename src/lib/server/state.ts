@@ -25,12 +25,32 @@ interface RvState {
   phoneReservations: Map<string, { minutes: number; month: string; userId: string; at: number }>
   /** month key → inbound phone minutes used (application cap, of the 50 included) */
   phoneMinutes: Map<string, number>
+  /** B3: rooms whose STT reservation was already settled on this instance (idempotent end). */
+  settledRooms: Map<string, number>
   reconciliations: { at: number; provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string }[]
 }
-export interface ActiveSession { room: string; conversationId: string; mode: string; startedAt: number; maxMinutes: number; generation: number }
+/**
+ * Per-instance CACHE of sessions started on THIS instance. Since B4 it is never the source of truth:
+ * session-scoped routes authorize with the signed session ticket (src/lib/session-ticket.ts) and
+ * fall back to LiveKit room metadata. The cache only records which STT minutes this instance's
+ * in-memory ledgers reserved, so they can be refunded exactly once (B3).
+ */
+export interface ActiveSession {
+  room: string
+  conversationId: string
+  mode: string
+  startedAt: number
+  maxMinutes: number
+  generation: number
+  /** B3: minutes reserved on this instance's user + project ledgers, the UTC day, and the durable reservation. */
+  sttMinutes: number
+  sttDay: string
+  sttReservationId: string | null
+}
 const g = globalThis as unknown as { __rv?: RvState }
+if (g.__rv && !g.__rv.settledRooms) g.__rv.settledRooms = new Map() // hot-reload safety
 if (!g.__rv) {
-  g.__rv = { ledgers: new Map(), projectLedger: new BudgetLedger(), replay: new MemoryReplayStore(), turns: new Map(), candidates: new Map(), sessions: new Map(), phoneCodes: new Map(), phoneReservations: new Map(), phoneMinutes: new Map(), reconciliations: [] }
+  g.__rv = { ledgers: new Map(), projectLedger: new BudgetLedger(), replay: new MemoryReplayStore(), turns: new Map(), candidates: new Map(), sessions: new Map(), phoneCodes: new Map(), phoneReservations: new Map(), phoneMinutes: new Map(), settledRooms: new Map(), reconciliations: [] }
 }
 
 /** Per-user ledger AND a project-wide ledger: both must allow a request (intersecting limits). */
@@ -105,4 +125,25 @@ export function phoneMonthUsed(now = Date.now()): number {
     if (r.month === m) used += r.minutes
   }
   return used
+}
+
+/**
+ * B3: settle a session's listening reservation exactly once per instance.
+ * - The in-memory ledgers are refunded only if THIS instance made the reservation (cache hit).
+ * - The durable reservation (if any) is settled by the caller via settleDurable — Postgres makes
+ *   that idempotent (`where status = 'reserved'`).
+ * Returns false if this room was already settled here.
+ */
+export function settleLocalStt(userId: string, room: string, usedMinutes: number, now = Date.now()): boolean {
+  const st = g.__rv!
+  for (const [k, t] of st.settledRooms) if (now - t > 86_400_000) st.settledRooms.delete(k)
+  if (st.settledRooms.has(room)) return false
+  st.settledRooms.set(room, now)
+  const s = st.sessions.get(userId)
+  if (s && s.room === room) {
+    ledgerFor(userId).releaseSttMinutes(s.sttMinutes, usedMinutes, s.sttDay, now)
+    st.projectLedger.releaseSttMinutes(s.sttMinutes, usedMinutes, s.sttDay, now)
+    st.sessions.delete(userId)
+  }
+  return true
 }

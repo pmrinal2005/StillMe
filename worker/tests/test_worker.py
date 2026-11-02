@@ -316,3 +316,22 @@ def test_worker_auth_header_format():
 def test_log_sanitize_drops_content():
     out = sanitize({"evt": "tts", "text": "secret words", "transcript": "x", "chars": 5})
     assert "text" not in out and "transcript" not in out and out["chars"] == 5
+
+
+# ------------------------------------------------------------------ B2: stable approval secret (shared with the web app)
+def test_derived_approval_secret_matches_web():
+    # Same vector as tests/bugfixes-b1-b4.test.ts (src/lib/server/env.ts deriveApprovalSecret)
+    assert config.derive_approval_secret("lk-secret-example") == "5961b2967a75d69fd5fdf6066fcf6e965be7d6139910ded75c71686bc06ce2fe"
+
+
+def test_resolve_approval_secret_order(monkeypatch):
+    for k in ("REVOICE_APPROVAL_SECRET", "LIVEKIT_API_SECRET", "ASSEMBLYAI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert config.resolve_approval_secret() == (None, "missing")  # never a random per-process secret
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "aai")
+    assert config.resolve_approval_secret()[1] == "derived:ASSEMBLYAI_API_KEY"
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "lk-secret-example")
+    assert config.resolve_approval_secret() == ("5961b2967a75d69fd5fdf6066fcf6e965be7d6139910ded75c71686bc06ce2fe", "derived:LIVEKIT_API_SECRET")
+    monkeypatch.setenv("REVOICE_APPROVAL_SECRET", "explicit")
+    assert config.resolve_approval_secret() == ("explicit", "explicit")
+    assert config.load_env().approval_secret == "explicit"

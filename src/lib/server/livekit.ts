@@ -1,5 +1,5 @@
 import 'server-only'
-import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk'
+import { AccessToken, AgentDispatchClient, RoomServiceClient, TrackSource } from 'livekit-server-sdk'
 import { env } from './env'
 import { hmacSha256Hex, randomId, timingSafeEqualHex } from '../hash'
 
@@ -38,6 +38,10 @@ export interface RoomMetadata {
   keyterms: string[]
   contextPrompt?: string
   maxSessionMinutes: number
+  /** B3/B4: server-set bookkeeping so ANY serverless instance can settle/close this room. Ignored by the worker. */
+  startedAt?: number
+  sttMinutes?: number
+  sttReservationId?: string | null
 }
 
 export async function ownerToken(opts: { identity: string; room: string; mode: RoomMetadata['mode'] }) {
@@ -52,7 +56,9 @@ export async function ownerToken(opts: { identity: string; room: string; mode: R
     canPublishData: true,
     // In partner-link/remote mode the owner's device primarily sends control events.
     canPublish: opts.mode === 'tabletop',
-    canPublishSources: opts.mode === 'tabletop' ? ['microphone' as never] : [],
+    // B1: livekit-server-sdk >= 2.x requires the TrackSource ENUM here; passing the string
+    // 'microphone' made toJwt() throw ("Cannot convert TrackSource microphone to string").
+    canPublishSources: opts.mode === 'tabletop' ? [TrackSource.MICROPHONE] : [],
     canUpdateOwnMetadata: false,
   })
   return at.toJwt()
@@ -69,7 +75,7 @@ export async function partnerToken(opts: { room: string; label: string }) {
     roomJoin: true,
     canSubscribe: true,
     canPublish: true,
-    canPublishSources: ['microphone' as never],
+    canPublishSources: [TrackSource.MICROPHONE], // B1: enum, not string
     canPublishData: false,
     canUpdateOwnMetadata: false,
   })
@@ -94,6 +100,40 @@ export async function createRoomAndDispatch(room: string, meta: RoomMetadata) {
 export async function deleteRoom(room: string) {
   const rs = new RoomServiceClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
   await rs.deleteRoom(room).catch(() => undefined)
+}
+
+function parseMeta(raw: string | undefined): RoomMetadata | null {
+  if (!raw) return null
+  try {
+    const m = JSON.parse(raw) as RoomMetadata
+    return m && typeof m.ownerIdentity === 'string' && typeof m.conversationId === 'string' ? m : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * B4: LiveKit is the cross-instance source of truth for which rooms exist and who owns them
+ * (metadata is set server-side only at creation). Returns null if the room does not exist.
+ */
+export async function getRoomMeta(room: string): Promise<RoomMetadata | null> {
+  const rs = new RoomServiceClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
+  const rooms = await rs.listRooms([room])
+  const r = rooms.find((x) => x.name === room)
+  return r ? parseMeta(r.metadata) : null
+}
+
+/** B4: all live owner rooms of a user (used to enforce one active conversation per user across instances). */
+export async function listOwnerRooms(userId: string): Promise<{ room: string; meta: RoomMetadata }[]> {
+  const rs = new RoomServiceClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
+  const rooms = await rs.listRooms()
+  const out: { room: string; meta: RoomMetadata }[] = []
+  for (const r of rooms) {
+    if (!r.name.startsWith('rv-')) continue
+    const m = parseMeta(r.metadata)
+    if (m && m.ownerIdentity === userId) out.push({ room: r.name, meta: m })
+  }
+  return out
 }
 
 /** Expiring, signed partner invite: rv1.<room>.<exp>.<sig> — never relies on room-name secrecy alone. */

@@ -9,6 +9,17 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0. Critical bug fixes (B1–B4)
+
+| # | Bug | Fix | Where |
+|---|---|---|---|
+| B1 | LiveKit tokens passed `canPublishSources: ['microphone']` (string). `livekit-server-sdk@2.19` needs the `TrackSource` enum, so `toJwt()` threw → `/api/livekit/join` empty 500, tabletop start crashed after the room/dispatch/budget were created | Grants use `TrackSource.MICROPHONE`. The owner token is minted **before** the room is created; join/session routes return JSON errors instead of empty 500s | `src/lib/server/livekit.ts`, `src/app/api/livekit/{join,session}/route.ts` |
+| B2 | With `REVOICE_APPROVAL_SECRET` unset, every serverless instance invented a random secret → demo identity churn, `bad_signature`, broken invites, worker couldn't verify | One deterministic resolution order shared by web **and** worker: explicit secret → `HMAC-SHA256(LIVEKIT_API_SECRET, label)` → `HMAC-SHA256(ASSEMBLYAI_API_KEY, label)`. Production never uses a random fallback (fails closed). Shared test vector in both test suites | `src/lib/server/env.ts`, `worker/revoice_worker/config.py` |
+| B3 | Full 20 listening minutes reserved on every start, never released on end or failure → lockout after 2 sessions | `BudgetLedger.releaseSttMinutes()`. Every failure path in session start refunds the user/project/durable reservations. `/api/livekit/end` commits the elapsed minutes and refunds the rest (idempotent). Replaced sessions are settled too | `src/lib/budget.ts`, `src/lib/server/state.ts`, `src/app/api/livekit/{session,end}/route.ts` |
+| B4 | Active-session state only in serverless memory → `wrong_room` on `/api/approve`, `not_your_session` on `/api/livekit/end` (room kept billing) | Stateless **signed session ticket** (`rvs1.<payload>.<hmac>`) issued at start, bound to user + room + conversation + generation + STT reservation, with expiry. The client sends it as `x-revoice-session` (or in the body for `sendBeacon`). Fallbacks: instance cache → LiveKit room metadata (server-set `ownerIdentity`). "One session per user" is checked against LiveKit's room list | `src/lib/session-ticket.ts`, `src/lib/server/session.ts`, `src/app/api/{approve,livekit/*,phone/pair}`, `src/lib/client/api.ts`, `src/components/ReVoiceApp.tsx` |
+
+Regression tests: `tests/bugfixes-b1-b4.test.ts` (web) and `worker/tests/test_worker.py` (B2 vector). **Still open:** B5 (worker-presence detection + HTTP TTS fallback), B6 (partner-link plays the voice on both devices), B7 (session-route polish, mode radio ignores the saved preference, favicon 404).
+
 ## 1. Current status
 
 | Area | State |
@@ -166,8 +177,7 @@ Presentation-only changes; no app logic changed. Tested in Chromium at 320×568 
 - **DB:** migrations are additive (`create table if not exists`). To roll back 0002, drop `phone_pair_codes` and `phone_calls`.
 
 ## 9. Owner handover checklist
-- [ ] Rotate `REVOICE_APPROVAL_SECRET` (32+ random bytes) and keep the web and worker copies identical.
-- [ ] Set `REVOICE_REQUIRE_SECRET=true` in production.
+- [ ] Rotate `REVOICE_APPROVAL_SECRET` (32+ random bytes) and keep the web and worker copies identical. (If unset, both sides derive the same secret from `LIVEKIT_API_SECRET` — see B2 below. Production never falls back to a random per-instance secret.)
 - [ ] Set `REVOICE_OPERATOR_IDS` to restrict who can record reconciliations.
 - [ ] Confirm AssemblyAI TTS entitlement, credit balance, region (`us`/`eu`; clones only work in the region where they were created) and turn off auto-refill.
 - [ ] Confirm Groq Free access to `openai/gpt-oss-20b`, check the account's rate limits and enable ZDR.
@@ -193,7 +203,7 @@ None of these can be done from code. Do them in order. Without any keys the app 
 ### Step 1 — Approval secret (required for production)
 1. Generate a random secret: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
 2. Put the same value in `REVOICE_APPROVAL_SECRET` in both `.env.local` and `worker/.env`, and later in Vercel and LiveKit. The web app and worker must match exactly.
-3. In production, also set `REVOICE_REQUIRE_SECRET=true` in Vercel.
+3. If you skip this, the web app **and** the worker both derive the same secret as `HMAC-SHA256(LIVEKIT_API_SECRET, "revoice/approval-secret/v1")` (or from `ASSEMBLYAI_API_KEY` if LiveKit is not configured). In production with none of these set, approval endpoints fail closed. `/api/status` reports `approvalSecretSource`.
 
 ### Step 2 — Supabase (sign-in and minimal database), free
 1. Sign up at https://supabase.com, then choose **New project**. Pick a region and set a database password.
@@ -247,7 +257,7 @@ None of these can be done from code. Do them in order. Without any keys the app 
 ### Step 7 — Deploy the frontend to Vercel Hobby
 1. Push the project to a GitHub repo (for example, your `StillMe` repo).
 2. At https://vercel.com/new, import the repo. `vercel.json` already sets the framework, install/build commands, region, function duration and headers.
-3. In **Project Settings → Environment Variables**, add every variable from `.env.example` with real values, plus `REVOICE_REQUIRE_SECRET=true` and optionally `REVOICE_OPERATOR_IDS` (comma-separated Supabase user IDs allowed to record reconciliations). Only the two `NEXT_PUBLIC_SUPABASE_*` variables may have the public prefix.
+3. In **Project Settings → Environment Variables**, add every variable from `.env.example` with real values, plus `REVOICE_APPROVAL_SECRET` (recommended) and optionally `REVOICE_OPERATOR_IDS` (comma-separated Supabase user IDs allowed to record reconciliations). Only the two `NEXT_PUBLIC_SUPABASE_*` variables may have the public prefix.
 4. Deploy, then put the Vercel URL into:
    - Supabase Site URL and Redirect URLs
    - the GitHub/Google OAuth homepage

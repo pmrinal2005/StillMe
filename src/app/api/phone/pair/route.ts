@@ -1,6 +1,7 @@
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { activeSession, phoneMonthUsed, rv } from '@/lib/server/state'
+import { phoneMonthUsed, rv } from '@/lib/server/state'
+import { resolveCurrentSession, ticketFrom } from '@/lib/server/session'
 import { allowedCallMinutes, hashPairCode, newPairCode, PAIR_CODE_TTL_MS } from '@/lib/phone'
 import { TELEPHONY } from '@/lib/features'
 import { audit } from '@/lib/server/durable'
@@ -17,7 +18,7 @@ export async function POST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   if (!env.phoneInboundEnabled() || !env.livekitUrl()) return json({ error: 'phone_disabled' }, 503)
-  const s = activeSession(id.userId)
+  const s = await resolveCurrentSession(id.userId, ticketFrom(req)).catch(() => null) // B4: ticket, not instance memory
   if (!s) return json({ error: 'no_active_session', message: 'Start a listening session first.' }, 409)
   const minutes = allowedCallMinutes(phoneMonthUsed())
   if (minutes <= 0) return json({ error: 'phone_cap', message: `The ${TELEPHONY.monthlyInboundMinutesCap}-minute monthly phone allowance is used.` }, 429)

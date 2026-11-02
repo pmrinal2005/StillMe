@@ -70,7 +70,7 @@ interface DayState {
   usd: number
 }
 
-function dayKey(now: number) {
+export function dayKey(now: number) {
   return new Date(now).toISOString().slice(0, 10)
 }
 
@@ -208,5 +208,24 @@ export class BudgetLedger {
     s.usd += usd
     this.lifetimeUsd += usd
     return { ok: true, minutes }
+  }
+
+  /**
+   * B3: settle a listening reservation. `usedMinutes` stays charged; the rest is refunded.
+   * Pass usedMinutes = 0 for a session that never started (room/dispatch failure).
+   * `day` is the UTC day the reservation was made (YYYY-MM-DD); refunds never go below zero.
+   */
+  releaseSttMinutes(reservedMinutes: number, usedMinutes = 0, day?: string, now = Date.now()) {
+    const refund = Math.max(0, reservedMinutes - Math.max(0, usedMinutes))
+    if (refund <= 0) return 0
+    const key = day ?? dayKey(now)
+    const s = this.days.get(key)
+    if (!s) return 0 // day already rolled over — nothing outstanding to refund
+    const minutes = Math.min(refund, s.sttMinutes)
+    const usd = (minutes / 60) * PRICES.sttFlagshipPerHour
+    s.sttMinutes -= minutes
+    s.usd = Math.max(0, s.usd - usd)
+    this.lifetimeUsd = Math.max(0, this.lifetimeUsd - usd)
+    return minutes
   }
 }

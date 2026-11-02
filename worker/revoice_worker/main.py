@@ -599,7 +599,7 @@ async def entrypoint(ctx: Any) -> None:
     assert_safe_defaults()
     env = load_env()
     if not env.assembly_key or not env.approval_secret:
-        raise RuntimeError("ASSEMBLYAI_API_KEY and REVOICE_APPROVAL_SECRET are required")
+        raise RuntimeError("ASSEMBLYAI_API_KEY is required, plus REVOICE_APPROVAL_SECRET or LIVEKIT_API_SECRET (approval secret is derived from it)")
     # Subscribe to nothing by default: each track is authorized individually.
     await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_NONE)
     meta = parse_meta(ctx.room.metadata)
