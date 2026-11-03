@@ -374,17 +374,32 @@ export class SpeechController {
       case 'uncertain':
         if (this.state.kind === 'speaking' && !this.state.audioStarted) this.emit({ type: 'first_audio' })
         this.roomAttempt = null
+        this.roomPending = null
         this.emit({ type: 'network_failed', reason: s.reason ?? 'delivery_uncertain' })
         break
       case 'rejected':
       case 'error':
         this.roomAttempt = null
+        this.roomPending = null
         this.emit({ type: 'failed', message: s.reason ?? s.type })
         break
       case 'cancelled':
         this.roomAttempt = null
+        this.roomPending = null
         break
     }
+  }
+
+  /**
+   * B5 hardening: the worker participant LEFT the room while a room utterance was in flight.
+   * Previously the controller waited for a `done` that could never arrive (stuck in Speaking, Speak
+   * blocked as `busy`) when the worker had already acknowledged. Now:
+   *  - nothing heard yet (no `speaking` status) → cancel + same frozen text once via HTTP TTS;
+   *  - audio may have been heard → Delivery uncertain (never an automatic replay).
+   */
+  async onWorkerLeft(): Promise<'none' | 'spoken' | 'uncertain' | 'rejected' | 'stopped' | 'error'> {
+    if (!this.roomAttempt || !this.roomPending) return 'none'
+    return this.fallbackToDirect('worker_left')
   }
 
   /** Worker connection dropped mid-utterance → uncertain if audio may have been heard. */

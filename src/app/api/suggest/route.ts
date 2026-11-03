@@ -4,13 +4,14 @@ import { generateCandidates, GroqError, buildMessages } from '@/lib/server/groq'
 import { CandidateSet, SuggestRequest } from '@/lib/contracts'
 import { estimateTokens } from '@/lib/budget'
 import { randomId, sha256Hex } from '@/lib/hash'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 30
 
 const CANDIDATE_TTL_MS = 90_000
 
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   const parsed = SuggestRequest.safeParse(await req.json().catch(() => null))
@@ -69,3 +70,5 @@ export async function POST(req: Request) {
     throw e
   }
 }
+
+export const POST = withJsonErrors('suggest', handlePOST)

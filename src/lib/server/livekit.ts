@@ -42,6 +42,14 @@ export interface RoomMetadata {
   startedAt?: number
   sttMinutes?: number
   sttReservationId?: string | null
+  /**
+   * Open item (phone, cross-instance): the owner's live pair code, stored HMAC-hashed (never in clear)
+   * so /api/phone/bind on ANY instance can find it. Room metadata is visible to room participants, but
+   * the hash is keyed with the server secret, so the 6-digit code cannot be brute-forced from it.
+   */
+  phonePair?: { codeHash: string; expiresAt: number; attempts: number } | null
+  /** Minutes reserved for an in-progress inbound call (settled by /api/phone/usage on any instance). */
+  phoneCall?: { identity: string; minutes: number; month: string; at: number } | null
 }
 
 export async function ownerToken(opts: { identity: string; room: string; mode: RoomMetadata['mode'] }) {
@@ -102,7 +110,7 @@ export async function deleteRoom(room: string) {
   await rs.deleteRoom(room).catch(() => undefined)
 }
 
-function parseMeta(raw: string | undefined): RoomMetadata | null {
+export function parseMeta(raw: string | undefined): RoomMetadata | null {
   if (!raw) return null
   try {
     const m = JSON.parse(raw) as RoomMetadata
@@ -152,4 +160,22 @@ export async function verifyInvite(invite: string, now = Date.now()): Promise<{ 
   const expected = await hmacSha256Hex(env.approvalSecret(), `invite:${room}:${ownerIdentity}:${exp}`)
   if (!timingSafeEqualHex(expected, sig)) return null
   return { room, ownerIdentity }
+}
+
+/** Replace a room's server-set metadata (read-modify-write callers only; see phone-store.ts). */
+export async function updateRoomMeta(room: string, meta: RoomMetadata): Promise<void> {
+  const rs = new RoomServiceClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
+  await rs.updateRoomMetadata(room, JSON.stringify(meta))
+}
+
+/** All live ReVOICE owner rooms with valid metadata (any owner). */
+export async function listAllOwnerRooms(): Promise<{ room: string; meta: RoomMetadata }[]> {
+  const rs = new RoomServiceClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
+  const out: { room: string; meta: RoomMetadata }[] = []
+  for (const r of await rs.listRooms()) {
+    if (!r.name.startsWith('rv-')) continue
+    const m = parseMeta(r.metadata)
+    if (m) out.push({ room: r.name, meta: m })
+  }
+  return out
 }

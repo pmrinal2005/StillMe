@@ -8,6 +8,7 @@ import { AssemblyError, synthesizeApproved } from '@/lib/server/assemblyai'
 import { SpeakRequest } from '@/lib/contracts'
 import { ApprovalError, verifyApproval } from '@/lib/approval'
 import { codePoints } from '@/lib/hash'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -19,7 +20,7 @@ export const maxDuration = 60
  * Stop: the client aborts the fetch; req.signal propagates and cancels upstream synthesis.
  * Late bytes from a cancelled attempt are discarded client-side by playbackAttemptId.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   const parsed = SpeakRequest.safeParse(await req.json().catch(() => null))
@@ -89,3 +90,5 @@ export async function POST(req: Request) {
     throw e
   }
 }
+
+export const POST = withJsonErrors('speak', handlePOST)

@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers'
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { forgetUser } from '@/lib/server/state'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,7 +10,7 @@ export const dynamic = 'force-dynamic'
  * (see migrations). Application deletion does NOT delete data held by third parties:
  * cloned voices must be deleted in the AssemblyAI dashboard; Groq/LiveKit retention per their policies.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   forgetUser(id.userId)
@@ -23,3 +24,5 @@ export async function POST(req: Request) {
     ],
   })
 }
+
+export const POST = withJsonErrors('account/delete', handlePOST)

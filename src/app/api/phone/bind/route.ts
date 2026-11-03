@@ -1,12 +1,14 @@
 import { z } from 'zod'
 import { json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { activeSession, monthKey, phoneMonthUsed, rv } from '@/lib/server/state'
-import { allowedCallMinutes, BINDING_TTL_MS, hashPairCode, isPairCode, MAX_BIND_ATTEMPTS_PER_CODE, signPhoneBinding } from '@/lib/phone'
+import { monthKey, phoneMonthUsed, rv } from '@/lib/server/state'
+import { allowedCallMinutes, BINDING_TTL_MS, hashPairCode, isPairCode, signPhoneBinding } from '@/lib/phone'
 import { verifyWorkerAuth } from '@/lib/server/worker-auth'
 import { audit, reservePhoneCallDurable } from '@/lib/server/durable'
 import { TELEPHONY } from '@/lib/features'
 import { logEvent } from '@/lib/server/log'
+import { withJsonErrors } from '@/lib/server/route'
+import { consumePairCode, dropPairCode, livekitRoomStore, lookupPairCode } from '@/lib/server/phone-store'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,11 +22,16 @@ const Body = z.object({
  * Worker-only (HMAC). Validates a DTMF pair code against an ACTIVE owner session and the monthly cap,
  * reserves the call's minutes, and returns a signed binding the owner-room worker will verify before
  * it transcribes the caller. Codes are single use; wrong guesses are bounded.
+ *
+ * Cross-instance (open item): the code is looked up in the owner rooms' LiveKit metadata (hashed),
+ * not in this instance's memory. A room that still exists IS the active session (rooms are deleted on
+ * end — B3/B4), so no instance-local session cache is consulted.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const raw = await req.text()
   if (!(await verifyWorkerAuth(env.approvalSecret(), req.headers.get('x-revoice-worker'), raw))) return json({ error: 'unauthorized' }, 401)
   if (!env.phoneInboundEnabled()) return json({ error: 'phone_disabled' }, 503)
+  if (!env.livekitUrl() || !env.livekitKey() || !env.livekitSecret()) return json({ error: 'livekit_not_configured' }, 503)
   let parsedJson: unknown
   try {
     parsedJson = JSON.parse(raw)
@@ -35,42 +42,40 @@ export async function POST(req: Request) {
   if (!parsed.success) return json({ error: 'invalid_code' }, 400)
   const { code, identity } = parsed.data
 
-  const codes = rv().phoneCodes
   const key = await hashPairCode(env.approvalSecret(), code)
-  const entry = codes.get(key)
   const now = Date.now()
-  if (!entry || entry.expiresAt < now) {
-    if (entry) codes.delete(key)
+  rv().phoneCodes.delete(key) // instance cache is advisory only
+  const store = await livekitRoomStore()
+  const found = await lookupPairCode(store, key, now)
+  if (!found.ok) {
     logEvent({ evt: 'phone_bind', status: 'rejected', reason: 'invalid_code' })
     return json({ error: 'invalid_code' }, 403)
   }
-  entry.attempts += 1
-  if (entry.attempts > MAX_BIND_ATTEMPTS_PER_CODE) {
-    codes.delete(key)
-    return json({ error: 'invalid_code' }, 403)
-  }
-  const s = activeSession(entry.userId)
-  if (!s || s.room !== entry.room) {
-    codes.delete(key)
-    return json({ error: 'no_active_session' }, 409)
+  const { room, meta } = found
+  if (meta.phoneCall) {
+    await dropPairCode(store, room)
+    return json({ error: 'call_in_progress' }, 409)
   }
   const minutes = allowedCallMinutes(phoneMonthUsed(now))
   if (minutes <= 0) {
-    codes.delete(key)
+    await dropPairCode(store, room)
     return json({ error: 'phone_cap' }, 429)
   }
   // Durable monthly reservation (cross-instance) intersects with the in-process ledger.
-  const d = await reservePhoneCallDurable(entry.userId, s.room, identity, TELEPHONY.monthlyInboundMinutesCap, minutes)
+  const d = await reservePhoneCallDurable(meta.ownerIdentity, room, identity, TELEPHONY.monthlyInboundMinutesCap, minutes)
   if (d && !d.ok) {
-    codes.delete(key)
+    await dropPairCode(store, room)
     return json({ error: 'phone_cap', reason: d.reason }, 429)
   }
   const granted = d?.ok ? Math.min(minutes, d.minutes) : minutes
 
-  codes.delete(key) // single use
-  rv().phoneReservations.set(`${s.room}:${identity}`, { minutes: granted, month: monthKey(now), userId: entry.userId, at: now })
-  const binding = await signPhoneBinding(env.approvalSecret(), s.room, identity, now + BINDING_TTL_MS, granted)
-  logEvent({ evt: 'phone_bind', status: 'ok', room: s.room, minutes: granted })
-  void audit(entry.userId, 'phone_bound', s.room)
-  return json({ ok: true, room: s.room, binding, maxMinutes: granted })
+  const call = { identity, minutes: granted, month: monthKey(now), at: now }
+  await consumePairCode(store, room, call) // single use + cross-instance call reservation, one metadata write
+  rv().phoneReservations.set(`${room}:${identity}`, { minutes: granted, month: call.month, userId: meta.ownerIdentity, at: now })
+  const binding = await signPhoneBinding(env.approvalSecret(), room, identity, now + BINDING_TTL_MS, granted)
+  logEvent({ evt: 'phone_bind', status: 'ok', room, minutes: granted })
+  void audit(meta.ownerIdentity, 'phone_bound', room)
+  return json({ ok: true, room, binding, maxMinutes: granted })
 }
+
+export const POST = withJsonErrors('phone/bind', handlePOST)

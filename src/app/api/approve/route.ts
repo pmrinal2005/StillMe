@@ -7,6 +7,7 @@ import { ApproveRequest, type TurnRef } from '@/lib/contracts'
 import { ApprovalError, issueApproval } from '@/lib/approval'
 import { materialChange } from '@/lib/turns'
 import { clonedVoiceUsable, isLibraryVoice } from '@/lib/voices'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -28,7 +29,7 @@ const VoiceAttestation = z
  * Freeze exact text → signed single-use approval. This is the ONLY way text becomes
  * eligible for TTS. Draft text never reaches TTS before this point.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   const raw = await req.json().catch(() => null)
@@ -76,3 +77,5 @@ export async function POST(req: Request) {
     throw e
   }
 }
+
+export const POST = withJsonErrors('approve', handlePOST)

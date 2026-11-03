@@ -7,6 +7,7 @@ import { settleDurable } from '@/lib/server/durable'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
 import { usedSttMinutes } from '@/lib/session-ticket'
 import { logEvent } from '@/lib/server/log'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -25,7 +26,7 @@ const Body = z.object({
  *     ANY serverless instance — previously it returned not_your_session and the room kept billing.
  * B3: the listening reservation is settled — elapsed minutes committed, the remainder refunded.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   const parsed = Body.safeParse(await req.json().catch(() => null))
@@ -45,3 +46,5 @@ export async function POST(req: Request) {
     return json({ error: 'end_failed', message: 'Could not close the room; it will close automatically when empty.' }, 502)
   }
 }
+
+export const POST = withJsonErrors('livekit/end', handlePOST)

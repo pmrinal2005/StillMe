@@ -7,6 +7,14 @@ export const metadata: Metadata = {
   description: 'Assistive communication: AI listens and drafts, the person approves the exact words, their authorized voice speaks.',
   manifest: '/manifest.webmanifest',
   applicationName: 'ReVOICE',
+  // B7: explicit icons — browsers request /favicon.ico by default, which used to 404 (console error).
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: 'any' },
+      { url: '/icon.svg', type: 'image/svg+xml' },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
 }
 
 export const viewport: Viewport = {

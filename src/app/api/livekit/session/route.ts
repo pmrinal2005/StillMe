@@ -10,6 +10,7 @@ import { InputLanguage, OutputLanguage } from '@/lib/contracts'
 import { randomId } from '@/lib/hash'
 import { dayKey, LIMITS } from '@/lib/budget'
 import { signSessionTicket, usedSttMinutes } from '@/lib/session-ticket'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +39,7 @@ async function closeExisting(userId: string, room: string, ticket: string | null
 }
 
 /** Start an explicit, bounded listening session (ONE active conversation per user). */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   if (!env.livekitUrl() || !env.livekitKey() || !env.livekitSecret()) return json({ error: 'livekit_not_configured' }, 503)
@@ -133,3 +134,5 @@ export async function POST(req: Request) {
     return json({ error: 'session_start_failed', message: 'Could not start the listening room. No listening minutes were used.' }, 502)
   }
 }
+
+export const POST = withJsonErrors('livekit/session', handlePOST)

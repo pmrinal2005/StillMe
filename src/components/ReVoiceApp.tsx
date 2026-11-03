@@ -31,7 +31,8 @@ import { PcmStreamPlayer } from '@/lib/client/pcm-player'
 import { FALLBACK_REJECTIONS, SpeechController, type SpeakSource } from '@/lib/client/speech'
 import { DirectSttListener, LiveKitListener, type TurnUpdate } from '@/lib/client/listening'
 import { PRESENCE_LABELS, WorkerPresenceMonitor, type PresenceSnapshot } from '@/lib/client/worker-presence'
-import { OWNER_FALLBACK_GATES_WORKER } from '@/lib/audio-routing'
+import { effectiveMode, modeAvailable } from '@/lib/session-mode'
+import { fallbackAudibleToPartner, fallbackNotice, OWNER_FALLBACK_GATES_WORKER } from '@/lib/audio-routing'
 import { count, noteTts, recordInterval } from '@/lib/client/metrics'
 import { getSupabase, signInWithOAuth } from '@/lib/client/supabase'
 import { TurnTracker, type PartnerTurn } from '@/lib/turns'
@@ -82,7 +83,9 @@ export function ReVoiceApp() {
   const [listening, setListening] = useState<string>('off')
   const [session, setSession] = useState<Session | null>(null)
   const [partnerPresent, setPartnerPresent] = useState(false)
-  const [mode, setMode] = useState<Mode>('tabletop')
+  // B7: the mode radio reflects (and persists) the saved `sessionMode` preference instead of a hard-coded 'tabletop'.
+  const mode: Mode = effectiveMode(prefs.sessionMode, !!status?.providers.livekit)
+  const setMode = useCallback((m: Mode) => update({ sessionMode: m }), [update])
   // B5: voice-worker presence → speech route (room vs direct HTTP TTS)
   const [worker, setWorker] = useState<PresenceSnapshot | null>(null)
 
@@ -234,7 +237,7 @@ export function ReVoiceApp() {
         presenceRef.current?.degrade(reason)
         if (presenceRef.current) setWorker(presenceRef.current.snapshot())
         count('routeFallbacks') // B5: room delivery failed before audio → HTTP TTS
-        setNotice('The voice worker did not respond, so your approved words are being spoken from this device instead.')
+        setNotice(fallbackNotice(sessionRef.current?.mode ?? 'tabletop', reason))
       },
       onMark: (name, at, info) => {
         const m = marks.current
@@ -549,7 +552,14 @@ export function ReVoiceApp() {
       const m = presenceRef.current
       if (!m) return
       if (present) m.agentJoined()
-      else m.agentLeft()
+      else {
+        m.agentLeft()
+        // B5 hardening: an in-flight room utterance can never complete once the worker is gone. Nothing heard →
+        // same frozen text once via HTTP TTS; possibly heard → Delivery uncertain (no automatic replay).
+        void speech?.onWorkerLeft().then((r) => {
+          if (r === 'uncertain') setNotice('The voice worker disconnected while speaking. Part of your message may have been heard — check before repeating it.')
+        })
+      }
       setWorker(m.snapshot())
     },
   }), [onTurn, speech, cleanupSession, endSession])
@@ -944,7 +954,7 @@ export function ReVoiceApp() {
                           <legend className="sr-only">Conversation mode</legend>
                           {MODES.map(([k, l, d, icon]) => (
                             <label key={k} className="rv-mode">
-                              <input type="radio" name="mode" checked={mode === k} onChange={() => setMode(k)} disabled={!status?.providers.livekit && k !== 'tabletop'} />
+                              <input type="radio" name="mode" value={k} checked={mode === k} onChange={() => setMode(k)} disabled={!modeAvailable(k, !!status?.providers.livekit)} />
                               <span className="grid gap-0.5">
                                 <span className="flex items-center gap-2 font-bold"><Icon name={icon} size={15} /> {l}</span>
                                 <span className="rv-muted text-xs">{d}</span>
@@ -976,6 +986,11 @@ export function ReVoiceApp() {
                         {session.kind === 'livekit' && worker && (worker.state === 'absent' || worker.state === 'lost') && (
                           <p role="status" className="rv-alert rv-alert-warn text-sm">
                             <Icon name="alert" size={15} /> No voice worker — captions are unavailable, but Speak still works from this device. This session ends automatically if the worker does not arrive.
+                          </p>
+                        )}
+                        {session.kind === 'livekit' && worker && worker.route === 'direct' && worker.state !== 'connecting' && !fallbackAudibleToPartner(session.mode) && (
+                          <p id="remote-fallback-warning" role="alert" className="rv-alert rv-alert-warn text-sm">
+                            <Icon name="alert" size={15} /> Remote call: until the voice worker is connected, Speak plays on this device only. Your remote partner will not hear it.
                           </p>
                         )}
                         {inviteUrl && (

@@ -5,6 +5,7 @@ import { ledgerFor, projectLedger } from '@/lib/server/state'
 import { mintSttToken, sttWsUrl } from '@/lib/server/assemblyai'
 import { InputLanguage } from '@/lib/contracts'
 import { LIMITS } from '@/lib/budget'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,7 +20,7 @@ const Body = z.object({
  * Browser-direct STT (trusted private demo ONLY; disabled unless REVOICE_ALLOW_BROWSER_STT=true).
  * Each mint reserves bounded listening minutes; the token's max session duration enforces the cap.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   if (!env.allowBrowserStt()) return json({ error: 'browser_stt_disabled' }, 403)
@@ -33,3 +34,5 @@ export async function POST(req: Request) {
   const token = await mintSttToken(p.minutes * 60)
   return json({ wsUrl: sttWsUrl({ token, sampleRate: b.sampleRate, languageCodes: b.languageCodes, keyterms: b.keyterms }), maxSessionSeconds: p.minutes * 60 })
 }
+
+export const POST = withJsonErrors('stt-token', handlePOST)

@@ -3,13 +3,14 @@ import { json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { getRoomMeta, partnerToken, verifyInvite } from '@/lib/server/livekit'
 import { logEvent } from '@/lib/server/log'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
 const Body = z.object({ invite: z.string().max(400), label: z.string().max(40).default('Partner'), consent: z.literal(true) })
 
 /** Partner joins via an expiring signed invite and must acknowledge transcription disclosure. */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   if (!env.livekitUrl() || !env.livekitKey() || !env.livekitSecret()) return json({ error: 'livekit_not_configured' }, 503)
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request', message: 'Consent to transcription is required to join.' }, 400)
@@ -28,3 +29,5 @@ export async function POST(req: Request) {
     return json({ error: 'join_failed', message: 'Could not join right now. Please try again.' }, 502)
   }
 }
+
+export const POST = withJsonErrors('livekit/join', handlePOST)

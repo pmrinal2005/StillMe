@@ -1,5 +1,6 @@
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { ledgerFor } from '@/lib/server/state'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -8,7 +9,7 @@ export const dynamic = 'force-dynamic'
  * on-device in IndexedDB and is exported client-side; Supabase rows are exported via RLS by the
  * client SDK. This returns what the app server holds: content-free usage counters only.
  */
-export async function GET(req: Request) {
+async function handleGET(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   return json({
@@ -18,3 +19,5 @@ export async function GET(req: Request) {
     note: 'ReVOICE does not record audio or store transcripts. Third-party providers (AssemblyAI, Groq, LiveKit) retain data under their own policies.',
   })
 }
+
+export const GET = withJsonErrors('account/export', handleGET)

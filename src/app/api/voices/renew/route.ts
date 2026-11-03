@@ -3,6 +3,7 @@ import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { ttsBase } from '@/lib/server/assemblyai'
 import { ledgerFor } from '@/lib/server/state'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,7 +19,7 @@ const Body = z.object({
  * account with extend_biometric_consent=true. Uses a minimal 2-character text (billed) and
  * buffers the response so the renewed expiry is reported in X-TTS-Voice-Expires-At.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   const key = env.assemblyKey()
@@ -43,3 +44,5 @@ export async function POST(req: Request) {
   console.log(JSON.stringify({ evt: 'consent_renewed', voice: parsed.data.voiceId.slice(0, 8) }))
   return json({ ok: true, providerExpiresAt: Number.isFinite(exp) && exp > 0 ? exp * 1000 : null })
 }
+
+export const POST = withJsonErrors('voices/renew', handlePOST)

@@ -6,6 +6,8 @@ import { verifyWorkerAuth } from '@/lib/server/worker-auth'
 import { recordUsage, settlePhoneCallDurable } from '@/lib/server/durable'
 import { logEvent } from '@/lib/server/log'
 import { TELEPHONY } from '@/lib/features'
+import { withJsonErrors } from '@/lib/server/route'
+import { livekitRoomStore, takePhoneCall } from '@/lib/server/phone-store'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,8 +16,12 @@ const Body = z.object({ room: z.string().regex(/^rv-[a-f0-9]{24}$/), minutes: z.
 /**
  * Worker-only (HMAC). Settles a finished call: the reservation is replaced by actual minutes
  * (rounded UP — LiveKit bills started minutes). Content-free.
+ *
+ * Cross-instance (open item): the reservation is read from (and cleared in) the owner room's LiveKit
+ * metadata, so settlement works no matter which instance handled /api/phone/bind. The instance cache
+ * is cleared too so it is never double-counted here.
  */
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const raw = await req.text()
   if (!(await verifyWorkerAuth(env.approvalSecret(), req.headers.get('x-revoice-worker'), raw))) return json({ error: 'unauthorized' }, 401)
   let body: unknown
@@ -26,17 +32,29 @@ export async function POST(req: Request) {
   }
   const parsed = Body.safeParse(body)
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
+  const { room, minutes } = parsed.data
   const state = rv()
-  let settled = 0
-  for (const [k, r] of state.phoneReservations) {
-    if (!k.startsWith(`${parsed.data.room}:`)) continue
-    const used = Math.min(r.minutes, Math.ceil(parsed.data.minutes))
-    state.phoneMinutes.set(r.month, (state.phoneMinutes.get(r.month) ?? 0) + used)
-    state.phoneReservations.delete(k)
-    void recordUsage({ userId: r.userId, provider: 'livekit', kind: 'phone_inbound', units: used })
-    settled = used
+
+  // Reservation: LiveKit metadata (any instance) first, else this instance's cache.
+  let res: { minutes: number; month: string; userId: string } | null = null
+  if (env.livekitUrl() && env.livekitKey() && env.livekitSecret()) {
+    const t = await takePhoneCall(await livekitRoomStore(), room).catch(() => null)
+    if (t) res = { minutes: t.call.minutes, month: t.call.month, userId: t.meta.ownerIdentity }
   }
-  await settlePhoneCallDurable(parsed.data.room, parsed.data.minutes)
-  logEvent({ evt: 'phone_usage', room: parsed.data.room, minutes: settled })
+  for (const [k, r] of state.phoneReservations) {
+    if (!k.startsWith(`${room}:`)) continue
+    state.phoneReservations.delete(k)
+    res = res ?? { minutes: r.minutes, month: r.month, userId: r.userId }
+  }
+  let settled = 0
+  if (res) {
+    settled = Math.min(res.minutes, Math.ceil(minutes))
+    state.phoneMinutes.set(res.month, (state.phoneMinutes.get(res.month) ?? 0) + settled)
+    void recordUsage({ userId: res.userId, provider: 'livekit', kind: 'phone_inbound', units: settled })
+  }
+  await settlePhoneCallDurable(room, minutes)
+  logEvent({ evt: 'phone_usage', room, minutes: settled })
   return json({ ok: true, minutes: settled })
 }
+
+export const POST = withJsonErrors('phone/usage', handlePOST)

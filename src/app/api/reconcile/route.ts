@@ -6,6 +6,7 @@ import { adminClient, audit, usageSummary } from '@/lib/server/durable'
 import { LIMITS } from '@/lib/budget'
 import { TELEPHONY } from '@/lib/features'
 import { reconcile } from '@/lib/reconcile'
+import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
@@ -43,7 +44,7 @@ async function appEstimate() {
   }
 }
 
-export async function GET(req: Request) {
+async function handleGET(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   if (!isOperator(id)) return json({ error: 'forbidden' }, 403)
@@ -58,7 +59,7 @@ export async function GET(req: Request) {
   return json({ estimate, recorded, assemblyai: latestAai ? reconcile(estimate.assemblyaiUsd, latestAai.providerReportedUsd) : null })
 }
 
-export async function POST(req: Request) {
+async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   if (!isOperator(id)) return json({ error: 'forbidden' }, 403)
@@ -92,3 +93,6 @@ export async function POST(req: Request) {
   }
   return json({ ok: true, result: appUsd === null ? null : reconcile(appUsd, b.providerReportedUsd) })
 }
+
+export const GET = withJsonErrors('reconcile', handleGET)
+export const POST = withJsonErrors('reconcile', handlePOST)

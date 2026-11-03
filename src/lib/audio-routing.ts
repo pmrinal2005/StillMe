@@ -44,3 +44,23 @@ export function echoTailMs(mode: ConversationMode): number {
   // Partner devices receive audio over the network (jitter buffer + transport), so the tail is longer.
   return mode === 'tabletop' ? 350 : 800
 }
+
+/**
+ * B5 hardening: can the partner actually HEAR speech delivered by the HTTP-TTS fallback?
+ * Fallback audio plays on the owner's device only. That works when the partner is co-located
+ * (tabletop, partner-link) but NOT in a remote call: the far-end partner hears nothing. The UI must
+ * say so instead of implying the message was delivered.
+ */
+export function fallbackAudibleToPartner(mode: ConversationMode): boolean {
+  return mode !== 'remote'
+}
+
+/** User-facing notice when room delivery falls back to this device (reason-aware, mode-aware). */
+export function fallbackNotice(mode: ConversationMode, reason: string): string {
+  const why = reason === 'worker_left' ? 'The voice worker disconnected before speaking'
+    : reason.startsWith('worker_bad_signature') ? 'The voice worker could not verify approvals (check REVOICE_APPROVAL_SECRET on the worker)'
+      : 'The voice worker did not respond'
+  return fallbackAudibleToPartner(mode)
+    ? `${why}, so your approved words are being spoken from this device instead.`
+    : `${why}. Your approved words are playing on THIS device only — your remote partner cannot hear them until the worker reconnects.`
+}

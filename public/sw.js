@@ -1,6 +1,6 @@
 /* ReVOICE offline shell. Network-first for navigations, cache fallback. API calls are never cached. */
-const CACHE = 'revoice-shell-v1'
-const SHELL = ['/', '/manifest.webmanifest', '/icon.svg']
+const CACHE = 'revoice-shell-v2'
+const SHELL = ['/', '/manifest.webmanifest', '/icon.svg', '/favicon.ico']
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()))
