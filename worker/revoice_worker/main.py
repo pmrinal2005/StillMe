@@ -33,6 +33,7 @@ from .config import (
     assert_safe_defaults,
     load_env,
 )
+from .echo import EchoGate
 from .gate import SpeechGate
 from .log import log_event
 from .phone import BIND_ATTR, DtmfCollector, verify_binding, worker_auth_header
@@ -48,7 +49,6 @@ TOPIC_STATUS = "revoice.status"
 
 STT_SAMPLE_RATE = 16_000
 TTS_SAMPLE_RATE = 24_000
-ECHO_TAIL_S = 0.35
 PHONE_PROMPT_VOICE = "aai-audrey"  # fixed LIBRARY voice — never a cloned voice for automated prompts
 PHONE_PROMPT = (
     "This line connects to a ReVOICE assistive communication session. Your speech will be transcribed. "
@@ -77,6 +77,13 @@ class StopControl(BaseModel):
 class ListenControl(BaseModel):
     type: str
     enabled: bool
+
+
+class GateControl(BaseModel):
+    """B6: owner device is playing approved speech itself (HTTP-TTS fallback) -> treat partner audio as echo."""
+    type: str
+    on: bool
+    ttlMs: int | None = None
 
 
 # --------------------------------------------------------------------------- helpers
@@ -145,7 +152,7 @@ class OwnerRoom:
     stt_task: asyncio.Task | None = None
     audio_task: asyncio.Task | None = None
     stt_stream: Any = None
-    echo_gate_until: float = 0.0
+    echo: EchoGate = field(default_factory=EchoGate)
     voice: str = ""
     language: str = ""
     closing: bool = False
@@ -218,6 +225,7 @@ class OwnerRoom:
                 self._consider(pub, p)
         if self.meta.ownerIdentity not in room.remote_participants:
             self.watchdog.owner_left(time.monotonic())
+        self.echo.mode = self.meta.mode
         await self.status("ready")
         log_event(evt="room_ready", room=room.name, kind=self.meta.mode)
 
@@ -296,9 +304,10 @@ class OwnerRoom:
                 if s is None:
                     continue  # paused: frames are dropped, nothing is sent or billed
                 frame = ev.frame
-                # Tabletop echo safety: while our synthesized voice plays (plus a short tail),
+                # B6 echo safety (ALL modes, architecture rule 5): while our synthesized voice plays — from
+                # this worker or from the owner's device during HTTP-TTS fallback — plus a mode-aware tail,
                 # send silence so our own output is never transcribed as partner input.
-                if self.meta.mode == "tabletop" and (self.gate.phase == "speaking" or time.monotonic() < self.echo_gate_until):
+                if self.echo.should_silence(time.monotonic(), gate_phase_speaking=self.gate.phase == "speaking"):
                     frame = rtc.AudioFrame(bytes(len(frame.data) * 2), frame.sample_rate, frame.num_channels, frame.samples_per_channel)
                 s.push_frame(frame)
         finally:
@@ -357,6 +366,17 @@ class OwnerRoom:
                 pass
         elif t == "end":
             asyncio.create_task(self.end("user"))
+        elif t == "hello":
+            # B5: presence probe from the owner device. Answer only once fully set up.
+            if self.source is not None and not self.closing:
+                asyncio.create_task(self.status("ready"))
+        elif t == "gate":
+            try:
+                g = GateControl.model_validate(raw)
+                self.echo.owner_gate(g.on, time.monotonic(), g.ttlMs)
+                log_event(evt="owner_gate", status="on" if g.on else "off")
+            except ValidationError:
+                pass
 
     async def _speak(self, raw: dict) -> None:
         try:
@@ -385,6 +405,7 @@ class OwnerRoom:
             if attempt.voice_id != self.voice or attempt.language != self.language:
                 self.tts.update_options(voice=attempt.voice_id, language=attempt.language)
                 self.voice, self.language = attempt.voice_id, attempt.language
+            self.echo.start_speaking()
             await self.status("speaking", attempt=attempt.attempt_id)
             first = True
             async with self.tts.synthesize(attempt.text) as stream:  # exact approved text only
@@ -396,13 +417,14 @@ class OwnerRoom:
                         first = False
                     await self.source.capture_frame(ev.frame)
             await self.source.wait_for_playout()
-            self.echo_gate_until = time.monotonic() + ECHO_TAIL_S
+            self.echo.stop_speaking(time.monotonic())
             if self.gate.finished(attempt.attempt_id):
                 log_event(evt="tts_done", attempt=attempt.attempt_id, chars=attempt.chars, ms=int((time.monotonic() - t0) * 1000))
                 await self.status("done", attempt=attempt.attempt_id)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
+            self.echo.stop_speaking(time.monotonic())
             outcome = self.gate.failed(attempt.attempt_id)
             log_event(evt="tts_failed", attempt=attempt.attempt_id, code=type(e).__name__, status=outcome)
             if outcome:
@@ -415,7 +437,7 @@ class OwnerRoom:
             self.speak_task.cancel()  # cancels server synthesis (socket request aborted)
         if self.source:
             self.source.clear_queue()  # drop queued device audio immediately
-        self.echo_gate_until = time.monotonic() + ECHO_TAIL_S
+        self.echo.stop_speaking(time.monotonic())
         if cur:
             log_event(evt="tts_stop", attempt=cur.attempt_id)
             await self.status("cancelled", attempt=cur.attempt_id)
@@ -434,6 +456,9 @@ class OwnerRoom:
     def _on_joined(self, p: Any) -> None:
         if p.identity == self.meta.ownerIdentity:
             self.watchdog.owner_returned()
+            # B5: the owner may have connected after our initial `ready` (which then went nowhere).
+            if self.source is not None and not self.closing:
+                asyncio.create_task(self.status("ready"))
         if _kind(p) == "sip":
             self._on_attrs(p)
 

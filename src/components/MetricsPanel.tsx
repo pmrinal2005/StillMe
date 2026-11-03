@@ -32,6 +32,7 @@ export function MetricsPanel({ status }: { status: StatusResponse | null }) {
         <dt className="rv-muted">AI suggestion sets not used</dt><dd>{c.aiRejected}{aiTotal ? ` (${Math.round((c.aiRejected / aiTotal) * 100)}%)` : ''}</dd>
         <dt className="rv-muted">Stops</dt><dd>{c.stops}</dd>
         <dt className="rv-muted">Delivery uncertain</dt><dd>{c.uncertain}</dd>
+        <dt className="rv-muted">Worker fallbacks (spoken from device)</dt><dd>{c.routeFallbacks}</dd>
         <dt className="rv-muted">Unapproved speech</dt><dd>{c.unapprovedSpeech}</dd>
         <dt className="rv-muted">Est. cost / approved turn (today)</dt><dd>{c.approvedTurns ? `$${(usd / c.approvedTurns).toFixed(4)}` : '—'}</dd>
       </dl>

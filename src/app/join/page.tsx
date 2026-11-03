@@ -5,11 +5,13 @@
  * speech will be transcribed, and publishes ONLY a microphone track.
  *
  * Partner coaching view: shows when the ReVOICE user is composing (never the draft content) and
- * encourages patience. Approved synthetic speech from the worker plays here.
+ * encourages patience. Approved synthetic speech from the worker plays here — and, in partner-link
+ * mode, ONLY here (B6).
  */
 import { useEffect, useRef, useState } from 'react'
 import { Room, RoomEvent, Track, type RemoteParticipant } from 'livekit-client'
 import { DataTopics, PresenceMessage } from '@/lib/contracts'
+import { partnerPlaysLocally } from '@/lib/audio-routing'
 import { Icon } from '@/components/ui/Icon'
 import { Backdrop, Logo, Orb, type OrbState } from '@/components/ui/Orb'
 
@@ -63,8 +65,10 @@ export default function JoinPage() {
           } catch {}
         })
         .on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
-          // Play ONLY the worker's approved synthetic voice (owner device publishes no audio in this mode).
-          if (track.kind === Track.Kind.Audio && participant.isAgent) {
+          // B6: this phone is the ONLY place the synthetic voice plays in partner-link mode (the owner device
+          // no longer plays it, so this microphone never re-captures a second loudspeaker). Its own echo
+          // canceller removes this device's playback; the worker also gates STT while it speaks.
+          if (track.kind === Track.Kind.Audio && partnerPlaysLocally(participant.isAgent ? 'agent' : 'owner')) {
             const el = track.attach()
             el.dataset.revoice = 'voice'
             document.body.appendChild(el)

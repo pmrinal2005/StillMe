@@ -17,7 +17,7 @@ export type Mark =
 interface Sample { name: string; ms: number; warm: boolean }
 
 const samples: Sample[] = []
-const counters = { approvedTurns: 0, aiApproved: 0, aiEdited: 0, aiRejected: 0, typed: 0, stops: 0, uncertain: 0, unapprovedSpeech: 0 }
+const counters = { approvedTurns: 0, aiApproved: 0, aiEdited: 0, aiRejected: 0, typed: 0, stops: 0, uncertain: 0, unapprovedSpeech: 0, routeFallbacks: 0 }
 let lastTts = 0
 
 export function recordInterval(name: string, ms: number) {

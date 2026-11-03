@@ -28,8 +28,10 @@ import { Backdrop, Logo, Orb, type OrbState } from './ui/Orb'
 import { api, ApiError, getSessionTicket, setSessionTicket, type StatusResponse } from '@/lib/client/api'
 import { db, getCachedAudio, putCachedAudio } from '@/lib/client/db'
 import { PcmStreamPlayer } from '@/lib/client/pcm-player'
-import { SpeechController, type SpeakSource } from '@/lib/client/speech'
+import { FALLBACK_REJECTIONS, SpeechController, type SpeakSource } from '@/lib/client/speech'
 import { DirectSttListener, LiveKitListener, type TurnUpdate } from '@/lib/client/listening'
+import { PRESENCE_LABELS, WorkerPresenceMonitor, type PresenceSnapshot } from '@/lib/client/worker-presence'
+import { OWNER_FALLBACK_GATES_WORKER } from '@/lib/audio-routing'
 import { count, noteTts, recordInterval } from '@/lib/client/metrics'
 import { getSupabase, signInWithOAuth } from '@/lib/client/supabase'
 import { TurnTracker, type PartnerTurn } from '@/lib/turns'
@@ -81,6 +83,8 @@ export function ReVoiceApp() {
   const [session, setSession] = useState<Session | null>(null)
   const [partnerPresent, setPartnerPresent] = useState(false)
   const [mode, setMode] = useState<Mode>('tabletop')
+  // B5: voice-worker presence → speech route (room vs direct HTTP TTS)
+  const [worker, setWorker] = useState<PresenceSnapshot | null>(null)
 
   // suggestions
   const [set, setSet] = useState<CandidateSet | null>(null)
@@ -114,6 +118,9 @@ export function ReVoiceApp() {
   const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hiddenAt = useRef<number | null>(null)
   const presenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const presenceRef = useRef<WorkerPresenceMonitor | null>(null)
+  const presenceTick = useRef<ReturnType<typeof setInterval> | null>(null)
+  const workerGated = useRef(false)
   const playerRef = useRef<PcmStreamPlayer | null>(null)
   if (!playerRef.current && typeof window !== 'undefined') playerRef.current = new PcmStreamPlayer()
 
@@ -178,7 +185,7 @@ export function ReVoiceApp() {
   if (!speechRef.current && typeof window !== 'undefined') {
     speechRef.current = new SpeechController({
       sha256: sha256Hex,
-      approve: async (text, textHash, source) => {
+      approve: async (text, textHash, source, route) => {
         const s = sessionRef.current
         const p = prefsRef.current
         const v = voiceRef.current
@@ -187,7 +194,8 @@ export function ReVoiceApp() {
             text,
             textHash,
             conversationId: s?.conversationId ?? trackerRef.current.conversationId,
-            roomName: s?.kind === 'livekit' ? s.room : undefined,
+            // B5: bind to the room ONLY when the worker will deliver it; direct HTTP TTS needs roomName=null.
+            roomName: route === 'room' && s?.kind === 'livekit' ? s.room : undefined,
             generation: s?.generation ?? 0,
             voiceId: v.id,
             outputLanguage: p.outputLanguage,
@@ -211,7 +219,22 @@ export function ReVoiceApp() {
         const l = listenerRef.current
         const gated = s.kind === 'speaking'
         if (l instanceof DirectSttListener) l.gateMic(gated)
-        else if (l instanceof LiveKitListener && sessionRef.current?.mode === 'tabletop') void l.gateMic(gated)
+        else if (l instanceof LiveKitListener) {
+          if (sessionRef.current?.mode === 'tabletop') void l.gateMic(gated)
+          // B6: during the B5 HTTP-TTS fallback the voice plays on THIS device, outside the worker's own
+          // speech gate → ask the worker to treat partner audio as echo for the duration (+ tail).
+          const needGate = OWNER_FALLBACK_GATES_WORKER && gated && speechRef.current?.lastRoute === 'direct'
+          if (needGate !== workerGated.current) {
+            workerGated.current = needGate
+            void l.gateWorker(needGate)
+          }
+        }
+      },
+      onRouteFallback: (reason) => {
+        presenceRef.current?.degrade(reason)
+        if (presenceRef.current) setWorker(presenceRef.current.snapshot())
+        count('routeFallbacks') // B5: room delivery failed before audio → HTTP TTS
+        setNotice('The voice worker did not respond, so your approved words are being spoken from this device instead.')
       },
       onMark: (name, at, info) => {
         const m = marks.current
@@ -467,6 +490,12 @@ export function ReVoiceApp() {
   const cleanupSession = useCallback(() => {
     if (watchdog.current) clearTimeout(watchdog.current)
     watchdog.current = null
+    if (presenceTick.current) clearInterval(presenceTick.current)
+    presenceTick.current = null
+    presenceRef.current = null
+    workerGated.current = false
+    speech?.setRouteSource(undefined)
+    setWorker(null)
     listenerRef.current = null
     sessionRef.current = null
     setSessionTicket(null) // B4: ticket is only valid for the session it was issued for
@@ -505,12 +534,24 @@ export function ReVoiceApp() {
       if (s.state === 'error') setNotice(`Listening error${s.detail ? ` (${s.detail})` : ''}. Typing and phrases still work.`)
     },
     onWorkerStatus: (s: { type: string; playbackAttemptId?: string; reason?: string }) => {
+      if (s.type === 'ready' && presenceRef.current) {
+        presenceRef.current.workerReady()
+        setWorker(presenceRef.current.snapshot())
+      }
       speech?.onWorkerStatus(s)
       if (s.type === 'paused' && s.reason?.startsWith('budget')) void endSession('budget')
       if (s.type === 'ended') void endSession(s.reason === 'timeout' ? 'timeout' : 'idle')
-      if (s.type === 'rejected') setNotice(`The voice worker refused that message (${s.reason ?? 'rejected'}). Nothing was spoken.`)
+      // B5: rejections that trigger the automatic HTTP-TTS fallback are announced by onRouteFallback instead.
+      if (s.type === 'rejected' && !FALLBACK_REJECTIONS.has(s.reason ?? '')) setNotice(`The voice worker refused that message (${s.reason ?? 'rejected'}). Nothing was spoken.`)
     },
     onPartnerPresence: (p: boolean) => setPartnerPresent(p),
+    onAgentPresence: (present: boolean) => {
+      const m = presenceRef.current
+      if (!m) return
+      if (present) m.agentJoined()
+      else m.agentLeft()
+      setWorker(m.snapshot())
+    },
   }), [onTurn, speech, cleanupSession, endSession])
 
   const startSession = async () => {
@@ -523,13 +564,45 @@ export function ReVoiceApp() {
         setSessionTicket(r.ticket) // B4: signed ticket authorizes approve/end on ANY serverless instance
         trackerRef.current = new TurnTracker(r.conversationId, 0)
         callsPerTurn.current.clear()
-        const l = new LiveKitListener(listenerEvents, { url: r.url, token: r.token, publishMic: mode === 'tabletop', playPartnerAudio: mode === 'remote' })
+        // B6: the listener applies the per-mode audio routing policy (partner-link: voice only on the partner's phone).
+        const l = new LiveKitListener(listenerEvents, { url: r.url, token: r.token, publishMic: mode === 'tabletop', mode })
         listenerRef.current = l
         const s: Session = { kind: 'livekit', room: r.room, conversationId: r.conversationId, generation: 0, invite: r.invite, mode, startedAt: Date.now(), maxMinutes: r.maxSessionMinutes }
         sessionRef.current = s
         setSession(s)
+        // B5: room mode is NOT enabled on connect. Speech stays on direct HTTP TTS until the worker is
+        // confirmed present; the monitor also ends the session automatically if no worker ever joins.
+        const monitor = new WorkerPresenceMonitor()
+        presenceRef.current = monitor
+        speech?.setRouteSource(() => monitor.route())
+        setWorker(monitor.snapshot())
         await l.start()
         speech?.setRoom(l)
+        monitor.connected()
+        if (l.workerPresent) monitor.agentJoined()
+        setWorker(monitor.snapshot())
+        let lastState = monitor.state
+        let lastHello = Date.now()
+        presenceTick.current = setInterval(() => {
+          if (presenceRef.current !== monitor) return
+          // B5: a degraded/unconfirmed worker can prove itself again by answering a hello with `ready`.
+          if ((monitor.state === 'degraded' || monitor.state === 'waiting') && l.workerPresent && Date.now() - lastHello > 10_000) {
+            lastHello = Date.now()
+            void l.hello()
+          }
+          const verdict = monitor.tick()
+          if (monitor.state !== lastState) {
+            const prev = lastState
+            lastState = monitor.state
+            setWorker(monitor.snapshot())
+            if (monitor.state === 'absent') setNotice('The voice worker has not joined. Your approved words will be spoken from this device. Listening needs the worker — the session ends automatically if it does not arrive.')
+            else if (monitor.state === 'lost') setNotice('The voice worker disconnected. Speech continues from this device; listening resumes if it reconnects.')
+            else if (monitor.state === 'ready' && (prev === 'absent' || prev === 'lost' || prev === 'degraded')) setNotice('The voice worker is connected again. Listening and room speech are back.')
+          }
+          if (verdict === 'end') {
+            void endSession('error').then(() => setNotice('Listening ended: no voice worker was available to transcribe, so the room was closed and unused listening minutes were released. Typing, phrases and speech still work.'))
+          }
+        }, 1000)
         watchdog.current = setTimeout(() => void endSession('timeout'), r.maxSessionMinutes * 60_000)
       } else if (st?.providers.browserStt) {
         const conv = randomId(10)
@@ -889,8 +962,22 @@ export function ReVoiceApp() {
                         <p className="flex flex-wrap items-center gap-2 text-sm">
                           <span className="rv-badge rv-badge-brand">State: {listening}</span>
                           <span className="rv-badge">{session.kind === 'livekit' ? 'LiveKit worker' : 'direct (trusted demo)'}</span>
+                          {session.kind === 'livekit' && worker && (
+                            <span id="worker-presence" className={`rv-badge ${worker.route === 'room' ? 'rv-badge-brand' : ''}`} aria-live="polite" title={worker.reason ?? undefined}>
+                              <span className={`rv-dot ${worker.state === 'ready' ? 'live' : ''}`} style={{ background: worker.state === 'ready' ? 'var(--ok)' : worker.state === 'waiting' || worker.state === 'connecting' ? 'var(--warn, #d97706)' : 'var(--danger, #dc2626)' }} aria-hidden="true" />
+                              {PRESENCE_LABELS[worker.state]} · speech {worker.route === 'room' ? 'via room' : 'from this device'}
+                            </span>
+                          )}
                           <span className="rv-badge"><Icon name="clock" size={13} /> ends automatically after {session.maxMinutes} min</span>
                         </p>
+                        {session.kind === 'livekit' && session.mode === 'partner-link' && (
+                          <p className="rv-muted text-xs">Partner link: your voice plays on your partner&apos;s phone only (not on this device), so their microphone never re-captures it.</p>
+                        )}
+                        {session.kind === 'livekit' && worker && (worker.state === 'absent' || worker.state === 'lost') && (
+                          <p role="status" className="rv-alert rv-alert-warn text-sm">
+                            <Icon name="alert" size={15} /> No voice worker — captions are unavailable, but Speak still works from this device. This session ends automatically if the worker does not arrive.
+                          </p>
+                        )}
                         {inviteUrl && (
                           <div className="grid gap-1">
                             <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (expires in 30 min)</label>

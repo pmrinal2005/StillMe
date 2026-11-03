@@ -18,7 +18,20 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 | B3 | Full 20 listening minutes reserved on every start, never released on end or failure → lockout after 2 sessions | `BudgetLedger.releaseSttMinutes()`. Every failure path in session start refunds the user/project/durable reservations. `/api/livekit/end` commits the elapsed minutes and refunds the rest (idempotent). Replaced sessions are settled too | `src/lib/budget.ts`, `src/lib/server/state.ts`, `src/app/api/livekit/{session,end}/route.ts` |
 | B4 | Active-session state only in serverless memory → `wrong_room` on `/api/approve`, `not_your_session` on `/api/livekit/end` (room kept billing) | Stateless **signed session ticket** (`rvs1.<payload>.<hmac>`) issued at start, bound to user + room + conversation + generation + STT reservation, with expiry. The client sends it as `x-revoice-session` (or in the body for `sendBeacon`). Fallbacks: instance cache → LiveKit room metadata (server-set `ownerIdentity`). "One session per user" is checked against LiveKit's room list | `src/lib/session-ticket.ts`, `src/lib/server/session.ts`, `src/app/api/{approve,livekit/*,phone/pair}`, `src/lib/client/api.ts`, `src/components/ReVoiceApp.tsx` |
 
-Regression tests: `tests/bugfixes-b1-b4.test.ts` (web) and `worker/tests/test_worker.py` (B2 vector). **Still open:** B5 (worker-presence detection + HTTP TTS fallback), B6 (partner-link plays the voice on both devices), B7 (session-route polish, mode radio ignores the saved preference, favicon 404).
+Regression tests: `tests/bugfixes-b1-b4.test.ts` (web) and `worker/tests/test_worker.py` (B2 vector).
+
+## 0b. Bug fixes B5–B6
+
+| # | Bug | Fix | Where |
+|---|---|---|---|
+| B5 | Room mode was switched on as soon as the owner device connected to LiveKit, **before the worker joined**. If the agent wasn't deployed, was cold or crashed, every Speak during a session failed with `worker_not_present` — no notice, no timeout — even though HTTP TTS worked | **Worker-presence detection.** `WorkerPresenceMonitor` (`connecting → waiting → ready`, plus `absent` / `lost` / `degraded`) decides the route for each utterance. Speech goes **via the room only while the worker is confirmed** (agent participant present **and** a `ready` status, or 4 s of presence for older workers). Otherwise it goes through `/api/speak` HTTP TTS, so **Speak is never blocked**. Approvals are **route-bound**: room approvals carry `roomName` (checked by the worker), direct approvals carry `roomName = null` (checked by `/api/speak`).<br>**Automatic fallback.** If a room delivery fails **before any audio** (send fails, no acknowledgement within 5 s, or the worker rejects with `bad_signature`), the controller first cancels that attempt at the worker, then speaks the **same frozen text** once over HTTP TTS with a fresh signature. It **never** falls back after audio may have been heard: that stays *Delivery uncertain*, with no automatic replay. User and budget rejections such as `session_char_cap` are **not** bypassed. A held approval whose worker left during the hold is re-signed for the direct route.<br>**UI.** Live badge *Voice worker connected · speech via room / from this device*, plus notices when the worker is absent, lost or back, and a *Worker fallbacks* metric.<br>**Auto-end.** Listening needs the worker. If it never joins (45 s) or leaves and doesn't return (30 s), the session ends automatically: the room is deleted and unused STT minutes are refunded (B3 settlement).<br>**Worker.** Answers a new `hello` control with `ready`, and re-sends `ready` when the owner joins (the first one could go to an empty room) | `src/lib/client/worker-presence.ts` (new), `src/lib/client/speech.ts`, `src/lib/client/listening.ts`, `src/lib/contracts.ts`, `src/components/ReVoiceApp.tsx`, `src/components/MetricsPanel.tsx`, `src/lib/client/metrics.ts`, `worker/revoice_worker/main.py` |
+| B6 | Partner-link mode played the synthetic voice on **both** devices. The partner's mic picked up the owner's speaker (each device's echo canceller only removes its own output), so ReVOICE's own speech was transcribed as partner input, breaking architecture rule 5 | **Audio routing policy** (`src/lib/audio-routing.ts`). In partner-link mode the voice plays **only on the partner's phone**. The owner device doesn't attach it, and doesn't even auto-subscribe to room audio; transcripts and status still arrive over data. Tabletop and remote keep their behaviour, and the join page plays only the agent's voice.<br>**Worker echo gate in every mode** (`worker/revoice_worker/echo.py`). Partner audio sent to STT is replaced with silence while the worker speaks, plus a mode-aware tail (0.35 s tabletop, 0.8 s partner-link/remote to cover network playout). Previously this gate only applied to tabletop.<br>**Fallback gating.** While the owner device plays B5 fallback speech, it sends a bounded `gate` control (TTL ≤ 120 s) so the worker treats partner audio as echo; a lost "off" can't mute the partner for good | `src/lib/audio-routing.ts` (new), `src/lib/client/listening.ts`, `src/app/join/page.tsx`, `src/components/ReVoiceApp.tsx`, `worker/revoice_worker/echo.py` (new), `worker/revoice_worker/main.py` |
+
+Regression tests: `tests/bugfixes-b5-b6.test.ts` (20 web tests) and `worker/tests/test_echo_b6.py` (8 worker tests). Totals: **116 web tests, 47 worker tests**. Both must pass. `npm run build` and the secret scan are clean.
+
+**New control messages (owner → worker, `revoice.control`):** `{type:"hello"}` (worker replies with status `ready`) and `{type:"gate", on, ttlMs?}`. Older workers ignore both. The client then falls back to the 4 s presence grace for routing and to its own mic gating, so web and worker can be deployed in either order.
+
+**Still open:** B7 (session-route polish, mode radio ignores the saved preference, favicon 404). Phone-pairing state is still kept in a single instance's memory (see B1–B4 notes).
 
 ## 1. Current status
 
@@ -35,7 +48,7 @@ Regression tests: `tests/bugfixes-b1-b4.test.ts` (web) and `worker/tests/test_wo
 | Python worker: BYOK STT/TTS, approval check, track filter, Stop/pause, watchdogs, phone binding | ✅ code + 37 pytest |
 | Phone bridge: pair code, 40 min/month cap, 15 min/call, worker HMAC; reconciliation route; migration 0002 | ✅ (off by default) |
 | Message bank, metrics panel, privacy (export/delete), reconciliation panel | ✅ |
-| Vitest: 77 tests across 9 suites | ✅ all passing |
+| Vitest: 116 tests across 11 suites (incl. B1–B4 and B5–B6 regressions) · pytest: 47 worker tests | ✅ all passing |
 | Build-time secret scan (fails the build on a leak) | ✅ |
 | axe-core WCAG 2.1 AA + best-practice: home, join, dark/reduced-motion, mobile | ✅ 0 violations |
 | **Frontend rebuilt (v2 "iridescent glass")**: side rail, animated liquid orb that mirrors listening/drafting/speaking/holding states, quick-action chips, iridescent composer, glass suggestion cards with shimmer while drafting, caption bubbles, tile phrase boards, glass partner join page | ✅ logic unchanged; axe 0 violations on 11 page/mode/viewport cases |
@@ -75,7 +88,7 @@ Control plane:  Browser ──► Next.js routes ──► Supabase (auth/prefs/
 Realtime plane: Partner mic ─► LiveKit room ─► Python worker ─► AssemblyAI STT (u3-6-pro)
                                                    │ transcript (data channel) ─► owner UI ─► /api/suggest (Groq)
                 owner approves ─► /api/approve ─► signed approval ─► worker re-verifies ─► AssemblyAI TTS ─► room audio
-Fallback:       /api/speak (HTTP TTS) · device voice · phrase boards · large text · message bank (all work offline/locally)
+Fallback:       /api/speak (HTTP TTS — automatic when the worker is absent/unresponsive, B5) · device voice · phrase boards · large text · message bank (all work offline/locally)
 ```
 
 Rules enforced in code and tests:

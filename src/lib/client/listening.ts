@@ -10,6 +10,7 @@
  */
 import { Room, RoomEvent, Track, type RemoteParticipant, type LocalTrackPublication } from 'livekit-client'
 import { ControlMessage, DataTopics, StatusMessage, TranscriptMessage, type Approval } from '../contracts'
+import { ownerPlaysLocally, type ConversationMode } from '../audio-routing'
 
 export interface TurnUpdate { turnId: number; text: string; endOfTurn: boolean }
 export interface ListenerEvents {
@@ -18,6 +19,8 @@ export interface ListenerEvents {
   onStatus: (s: { state: 'connecting' | 'listening' | 'paused' | 'reconnecting' | 'closed' | 'error'; detail?: string }) => void
   onWorkerStatus?: (s: ReturnType<typeof StatusMessage.parse>) => void
   onPartnerPresence?: (present: boolean) => void
+  /** B5: the voice worker (agent participant) joined or left the room. */
+  onAgentPresence?: (present: boolean) => void
 }
 
 const enc = new TextEncoder()
@@ -26,7 +29,16 @@ const dec = new TextDecoder()
 export class LiveKitListener {
   room: Room | null = null
   private micPub: LocalTrackPublication | undefined
-  constructor(private ev: ListenerEvents, private opts: { url: string; token: string; publishMic: boolean; playPartnerAudio?: boolean; workerIdentityPrefix?: string }) {}
+  constructor(private ev: ListenerEvents, private opts: { url: string; token: string; publishMic: boolean; mode: ConversationMode; workerIdentityPrefix?: string }) {}
+
+  get mode() {
+    return this.opts.mode
+  }
+
+  /** B5: is an agent (voice worker) participant currently in the room? */
+  get workerPresent() {
+    return this.agentIds().length > 0
+  }
 
   async start() {
     this.ev.onStatus({ state: 'connecting' })
@@ -51,9 +63,10 @@ export class LiveKitListener {
         } catch {}
       })
       .on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
-        // Worker publishes approved synthetic speech as an audio track: attach for local playback.
-        // Partner microphone audio is only played in remote-call mode (never in tabletop/partner-link: echo).
-        if (track.kind === Track.Kind.Audio && (participant.isAgent || this.opts.playPartnerAudio)) {
+        // B6: audio routing policy (src/lib/audio-routing.ts). In partner-link mode the synthetic voice plays
+        // ONLY on the partner's phone — playing it here too let the partner's mic capture this speaker and
+        // transcribe ReVOICE's own speech as partner input. Partner audio plays only in remote calls.
+        if (track.kind === Track.Kind.Audio && ownerPlaysLocally(this.opts.mode, participant.isAgent ? 'agent' : 'partner')) {
           const el = track.attach()
           el.dataset.revoice = 'agent-audio'
           document.body.appendChild(el)
@@ -63,13 +76,36 @@ export class LiveKitListener {
       .on(RoomEvent.Reconnecting, () => this.ev.onStatus({ state: 'reconnecting' }))
       .on(RoomEvent.Reconnected, () => this.ev.onStatus({ state: 'listening' }))
       .on(RoomEvent.Disconnected, () => this.ev.onStatus({ state: 'closed' }))
-      .on(RoomEvent.ParticipantConnected, (p) => !p.isAgent && this.ev.onPartnerPresence?.(true))
-      .on(RoomEvent.ParticipantDisconnected, (p) => !p.isAgent && this.ev.onPartnerPresence?.(false))
-    await room.connect(this.opts.url, this.opts.token)
+      .on(RoomEvent.ParticipantConnected, (p) => (p.isAgent ? this.onAgent(true) : this.ev.onPartnerPresence?.(true)))
+      .on(RoomEvent.ParticipantDisconnected, (p) => (p.isAgent ? this.onAgent(false) : this.ev.onPartnerPresence?.(false)))
+    // B6: in partner-link mode this device never plays room audio, so it does not even subscribe to it
+    // (data-channel transcripts/status still arrive). Tabletop/remote subscribe as before.
+    await room.connect(this.opts.url, this.opts.token, { autoSubscribe: this.opts.mode !== 'partner-link' })
+    // B5: the worker may already be in the room (it is dispatched before we connect).
+    if (this.workerPresent) this.onAgent(true)
+    if (Array.from(room.remoteParticipants.values()).some((p) => !p.isAgent)) this.ev.onPartnerPresence?.(true)
     if (this.opts.publishMic) {
       this.micPub = await room.localParticipant.setMicrophoneEnabled(true)
     }
     this.ev.onStatus({ state: 'listening' })
+  }
+
+  private onAgent(joined: boolean) {
+    if (!joined && this.workerPresent) return // another agent participant is still here
+    this.ev.onAgentPresence?.(joined)
+    if (joined) void this.hello()
+  }
+
+  /** B5: ask the worker to confirm it is alive (it replies with a `ready` status). */
+  async hello() {
+    const to = this.agentIds()
+    if (to.length) await this.send(DataTopics.control, ControlMessage.parse({ type: 'hello' }), to).catch(() => undefined)
+  }
+
+  /** B6: tell the worker to treat partner audio as echo while THIS device plays fallback speech. */
+  async gateWorker(on: boolean, ttlMs = 60_000) {
+    const to = this.agentIds()
+    if (to.length) await this.send(DataTopics.control, ControlMessage.parse({ type: 'gate', on, ttlMs }), to).catch(() => undefined)
   }
 
   private async send(topic: string, msg: unknown, to?: string[]) {

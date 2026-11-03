@@ -151,6 +151,13 @@ export const ControlMessage = z.discriminatedUnion('type', [
   z.object({ type: z.literal('stop'), playbackAttemptId: z.string().optional() }),
   z.object({ type: z.literal('listen'), enabled: z.boolean() }),
   z.object({ type: z.literal('end') }),
+  /** B5: presence probe — the worker answers with a `ready` status (owner device detects a live worker). */
+  z.object({ type: z.literal('hello') }),
+  /**
+   * B6: the owner device is playing approved speech itself (HTTP-TTS fallback). While `on`, the worker
+   * replaces partner audio with silence so our own output is never transcribed. Auto-expires after `ttlMs`.
+   */
+  z.object({ type: z.literal('gate'), on: z.boolean(), ttlMs: z.number().int().min(0).max(120_000).optional() }),
 ])
 
 export const StatusMessage = z.object({

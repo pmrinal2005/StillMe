@@ -11,11 +11,18 @@
  *  4. One utterance at a time.
  *  5. An approval held for a conversational gap is cancelled when context materially changes
  *     or when it has been held too long; the user must approve again.
+ *  6. (B5) Room mode is used ONLY while the worker is confirmed present (`route()` === 'room').
+ *     Otherwise approved speech goes through server-authorized HTTP TTS. If a room delivery
+ *     fails BEFORE any audio (worker absent / no acknowledgement), the controller cancels that
+ *     attempt at the worker and speaks the SAME frozen text once via HTTP TTS with a fresh,
+ *     route-bound server signature. It never falls back after audio may have been heard
+ *     (that stays DeliveryUncertain) and never changes the words.
  *
  * Framework-agnostic and dependency-injected so the invariants are unit-testable in Node.
  */
 import type { Approval } from '../contracts'
 import { reduceOutput, type OutputEvent, type OutputState } from '../output-state'
+import type { SpeechRoute } from './worker-presence'
 
 export interface PlayerLike {
   unlock(): Promise<void>
@@ -41,10 +48,23 @@ export interface SpeakOptions {
 
 export interface SpeechDeps {
   sha256(text: string): Promise<string>
-  approve(text: string, textHash: string, source?: SpeakSource): Promise<Approval>
+  /**
+   * Server-signed approval for the exact text. `route` decides the binding: 'room' approvals are bound
+   * to the LiveKit room (verified by the worker); 'direct' approvals carry roomName=null (verified by /api/speak).
+   */
+  approve(text: string, textHash: string, source: SpeakSource | undefined, route: SpeechRoute): Promise<Approval>
   directStream(approval: Approval, text: string, signal: AbortSignal): Promise<{ body: ReadableStream<Uint8Array>; sampleRate: number }>
   /** Present when a LiveKit worker is connected: the worker synthesizes into the room. */
   room?: { speak(approval: Approval, text: string): Promise<void>; stop(attemptId?: string): Promise<void> } | null
+  /**
+   * B5: live routing decision from the worker-presence monitor. When omitted, the room is used whenever
+   * it is set (legacy behaviour). When it returns 'direct', speech uses HTTP TTS even during a session.
+   */
+  route?(): SpeechRoute
+  /** B5: a room delivery failed before audio; the controller is falling back to HTTP TTS. */
+  onRouteFallback?(reason: string): void
+  /** B5: how long to wait for the worker to acknowledge (status 'speaking' / rejection) a room speak. */
+  roomAckTimeoutMs?: number
   player: PlayerLike
   cache?: {
     get(voiceId: string, language: string, textHash: string): Promise<{ pcm: ArrayBuffer; sampleRate: number } | undefined>
@@ -56,20 +76,33 @@ export interface SpeechDeps {
 }
 
 export const MAX_HOLD_MS = 45_000
+export const ROOM_ACK_TIMEOUT_MS = 5_000
+/** Worker rejections that mean "this worker cannot serve speech" (not a user/budget decision) → fall back. */
+export const FALLBACK_REJECTIONS: ReadonlySet<string> = new Set(['bad_signature', 'worker_not_present', 'worker_unreachable'])
 
 export class SpeechController {
   state: OutputState = { kind: 'idle' }
   private abort: AbortController | null = null
-  private held: { approval: Approval; text: string; opts: SpeakOptions; at: number } | null = null
+  private held: { approval: Approval; text: string; opts: SpeakOptions; at: number; route: SpeechRoute } | null = null
   private attempt: string | null = null
   private roomAttempt: string | null = null
   private stopped = new Set<string>()
   private lastTtsAt = -Infinity
+  private roomAck: ReturnType<typeof setTimeout> | null = null
+  private roomPending: { approval: Approval; text: string; opts: SpeakOptions; acked: boolean } | null = null
+  /** Route actually used by the most recent utterance (diagnostics/UI). */
+  lastRoute: SpeechRoute | null = null
 
   constructor(private d: SpeechDeps) {}
 
   private now() {
     return this.d.now ? this.d.now() : Date.now()
+  }
+
+  /** Which transport approved speech would use right now. */
+  currentRoute(): SpeechRoute {
+    if (!this.d.room) return 'direct'
+    return this.d.route ? this.d.route() : 'room'
   }
 
   private emit(e: OutputEvent) {
@@ -87,8 +120,9 @@ export class SpeechController {
     const frozen = text // exact displayed text — no trimming or rewriting after approval
     const hash = await this.d.sha256(frozen)
     let approval: Approval
+    const route = this.currentRoute() // B5: the approval is bound to the route chosen right now
     try {
-      approval = await this.d.approve(frozen, hash, opts.source)
+      approval = await this.d.approve(frozen, hash, opts.source, route)
     } catch (e) {
       this.emit({ type: 'failed', message: (e as Error).message || 'approval_rejected' })
       return 'rejected'
@@ -102,10 +136,10 @@ export class SpeechController {
     const hold = opts.partnerSpeaking && !opts.speakNow
     this.emit({ type: 'approved', text: frozen, approvalId: approval.approvalId, partnerSpeaking: hold, now: this.now() })
     if (hold) {
-      this.held = { approval, text: frozen, opts, at: this.now() }
+      this.held = { approval, text: frozen, opts, at: this.now(), route }
       return 'held'
     }
-    return this.play(approval, frozen, opts)
+    return this.play(approval, frozen, opts, route)
   }
 
   get isHolding() {
@@ -131,7 +165,7 @@ export class SpeechController {
       return 'expired' as const
     }
     this.emit({ type: kind })
-    return this.play(h.approval, h.text, h.opts)
+    return this.play(h.approval, h.text, h.opts, h.route)
   }
 
   /** Partner context materially changed while a message was held → renewed approval required. */
@@ -144,25 +178,101 @@ export class SpeechController {
     return false
   }
 
-  private async play(approval: Approval, text: string, opts: SpeakOptions) {
+  private async play(approval: Approval, text: string, opts: SpeakOptions, approvedFor: SpeechRoute) {
+    const route = this.currentRoute()
+    // Room mode: the worker verifies the approval again and publishes audio into the room.
+    // B5: only while the worker is confirmed present AND the approval was issued for the room.
+    if (route === 'room' && approvedFor === 'room' && this.d.room) {
+      const attemptId = approval.playbackAttemptId
+      this.attempt = attemptId
+      this.lastRoute = 'room' // set before 'started' so onState observers see the right route
+      this.emit({ type: 'started', attemptId })
+      this.d.onMark?.('tts_request', this.now(), { warm: this.now() - this.lastTtsAt < 5 * 60_000 })
+      this.roomAttempt = attemptId
+      this.roomPending = { approval, text, opts, acked: false }
+      try {
+        await this.d.room.speak(approval, text)
+      } catch (e) {
+        // Nothing reached the worker → nothing was heard → safe to deliver via HTTP TTS instead.
+        return this.fallbackToDirect((e as Error).message || 'worker_unreachable')
+      }
+      if (this.roomAttempt === attemptId && this.roomPending && !this.roomPending.acked) {
+        this.roomAck = setTimeout(() => {
+          this.roomAck = null
+          if (this.roomAttempt === attemptId && this.roomPending && !this.roomPending.acked && !this.stopped.has(attemptId)) {
+            void this.fallbackToDirect('worker_no_ack')
+          }
+        }, this.d.roomAckTimeoutMs ?? ROOM_ACK_TIMEOUT_MS)
+      }
+      return 'spoken' as const // completion arrives via onWorkerStatus()
+    }
+
+    // Direct HTTP TTS. A room-bound approval is not valid at /api/speak (roomName must be null), so a
+    // held room approval whose route changed (worker left during the hold) is re-signed for the direct
+    // route — same frozen text, nothing has been heard yet.
+    if (approvedFor === 'room') {
+      const direct = await this.reapproveDirect(text, opts)
+      if (!direct) return 'rejected' as const
+      approval = direct
+    }
+    return this.playDirect(approval, text, opts)
+  }
+
+  /** Fresh server signature for the SAME exact text, bound to the direct route. */
+  private async reapproveDirect(text: string, opts: SpeakOptions): Promise<Approval | null> {
+    try {
+      const hash = await this.d.sha256(text)
+      const a = await this.d.approve(text, hash, opts.source, 'direct')
+      if (a.textHash !== hash || a.roomName) {
+        this.emit({ type: 'failed', message: 'altered_text' })
+        return null
+      }
+      return a
+    } catch (e) {
+      this.emit({ type: 'failed', message: (e as Error).message || 'approval_rejected' })
+      return null
+    }
+  }
+
+  /**
+   * B5: room delivery failed BEFORE any audio. Cancel the attempt at the worker (so a late worker can
+   * never also speak it), then deliver the same frozen text once via HTTP TTS.
+   */
+  private async fallbackToDirect(reason: string) {
+    const pending = this.roomPending
+    const attemptId = this.roomAttempt
+    this.clearRoomAck()
+    this.roomPending = null
+    this.roomAttempt = null
+    if (!pending || (attemptId && this.stopped.has(attemptId))) return 'stopped' as const
+    if (this.state.kind === 'speaking' && this.state.audioStarted) {
+      // Audio may have been heard → never re-speak automatically.
+      this.emit({ type: 'network_failed', reason })
+      return 'uncertain' as const
+    }
+    if (attemptId) {
+      this.stopped.add(attemptId) // late statuses/frames for the room attempt are ignored
+      void this.d.room?.stop(attemptId).catch(() => undefined)
+    }
+    this.d.onRouteFallback?.(reason)
+    const direct = await this.reapproveDirect(pending.text, pending.opts)
+    if (!direct) return 'rejected' as const
+    if (this.state.kind !== 'speaking') return 'stopped' as const // user pressed Stop meanwhile
+    return this.playDirect(direct, pending.text, pending.opts)
+  }
+
+  private clearRoomAck() {
+    if (this.roomAck) clearTimeout(this.roomAck)
+    this.roomAck = null
+  }
+
+  private async playDirect(approval: Approval, text: string, opts: SpeakOptions) {
     const attemptId = approval.playbackAttemptId
     this.attempt = attemptId
+    this.lastRoute = 'direct'
     this.emit({ type: 'started', attemptId })
     const warm = this.now() - this.lastTtsAt < 5 * 60_000
     this.d.onMark?.('tts_request', this.now(), { warm })
-
-    // Room mode: the worker verifies the approval again and publishes audio into the room.
-    if (this.d.room) {
-      this.roomAttempt = attemptId
-      try {
-        await this.d.room.speak(approval, text)
-        return 'spoken' as const // completion arrives via onWorkerStatus()
-      } catch (e) {
-        this.roomAttempt = null
-        this.emit({ type: 'network_failed', reason: (e as Error).message || 'worker_unreachable' })
-        return 'error' as const
-      }
-    }
 
     // Authorized phrase cache (library voices only; see db.putCachedAudio).
     if (opts.cacheable && this.d.cache) {
@@ -242,6 +352,13 @@ export class SpeechController {
   onWorkerStatus(s: { type: string; playbackAttemptId?: string; reason?: string }) {
     if (!this.roomAttempt || (s.playbackAttemptId && s.playbackAttemptId !== this.roomAttempt)) return
     if (this.stopped.has(this.roomAttempt)) return
+    if (this.roomPending) this.roomPending.acked = true
+    this.clearRoomAck()
+    if ((s.type === 'rejected' || s.type === 'error') && FALLBACK_REJECTIONS.has(s.reason ?? '') && !(this.state.kind === 'speaking' && this.state.audioStarted)) {
+      // The worker cannot serve speech (e.g. mismatched secret). Nothing was heard → HTTP TTS.
+      void this.fallbackToDirect(`worker_${s.reason}`)
+      return
+    }
     switch (s.type) {
       case 'speaking':
         this.emit({ type: 'first_audio' })
@@ -249,6 +366,7 @@ export class SpeechController {
         break
       case 'done':
         this.roomAttempt = null
+        this.roomPending = null
         this.lastTtsAt = this.now()
         this.emit({ type: 'finished' })
         this.d.onMark?.('done', this.now())
@@ -271,8 +389,10 @@ export class SpeechController {
 
   /** Worker connection dropped mid-utterance → uncertain if audio may have been heard. */
   onRoomLost() {
+    this.clearRoomAck()
     if (this.state.kind === 'speaking' && this.roomAttempt) {
       this.roomAttempt = null
+      this.roomPending = null
       this.emit({ type: 'network_failed', reason: 'connection_lost' })
     }
   }
@@ -285,8 +405,11 @@ export class SpeechController {
     this.d.onMark?.('stop_silenced', this.now())
     this.abort?.abort()
     this.abort = null
-    if (this.d.room) void this.d.room.stop(this.roomAttempt ?? attemptId ?? undefined).catch(() => undefined)
+    if (this.d.room && this.roomAttempt) void this.d.room.stop(this.roomAttempt).catch(() => undefined)
+    else if (this.d.room) void this.d.room.stop(attemptId ?? undefined).catch(() => undefined)
+    this.clearRoomAck()
     this.roomAttempt = null
+    this.roomPending = null
     this.held = null
     this.emit({ type: 'stop' })
   }
@@ -298,6 +421,15 @@ export class SpeechController {
 
   setRoom(room: SpeechDeps['room']) {
     this.d.room = room
+    if (!room) {
+      this.clearRoomAck()
+      this.roomPending = null
+    }
+  }
+
+  /** B5: install (or clear) the live routing decision from the worker-presence monitor. */
+  setRouteSource(route: SpeechDeps['route'] | undefined) {
+    this.d.route = route
   }
 
   budgetPaused(reason: string) {
