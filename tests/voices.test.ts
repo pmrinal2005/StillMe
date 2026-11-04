@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CONSENT_PERIOD_DAYS, DEFAULT_VOICE_ID, LIBRARY_VOICES, clonedVoiceUsable, consentExpiry, isLibraryVoice, type ClonedVoiceProfile } from '@/lib/voices'
+import { CONSENT_PERIOD_DAYS, DEFAULT_VOICE_ID, LIBRARY_VOICES, clonedVoiceUsable, consentExpiry, isLibraryVoice, libraryVoicesFor, type ClonedVoiceProfile } from '@/lib/voices'
 import { OUTPUT_LANGUAGES } from '@/lib/contracts'
 import { hasNoSpokenOutput as unsupportedOutputFor } from '@/lib/languages'
 
@@ -39,5 +39,20 @@ describe('voice wardrobe', () => {
   it('input language is independent of output language (Hindi input has no spoken-output match)', () => {
     expect(unsupportedOutputFor('hi')).toBe(true)
     expect(unsupportedOutputFor('en')).toBe(false)
+  })
+  it('every library voice id is unique and slug-shaped (a radio selection maps to exactly one voice)', () => {
+    const ids = LIBRARY_VOICES.map((v) => v.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const id of ids) expect(id).toMatch(/^aai-[a-z]+$/)
+  })
+  it('every supported spoken-output language offers at least one library voice of its own', () => {
+    for (const lang of OUTPUT_LANGUAGES) {
+      const own = LIBRARY_VOICES.filter((v) => v.language === lang)
+      expect(own.length, `no voice for ${lang}`).toBeGreaterThan(0)
+      expect(libraryVoicesFor(lang)).toEqual(own)
+    }
+  })
+  it('Italian output is selectable (built-in voices speak it; verified live)', () => {
+    expect(libraryVoicesFor('italian').map((v) => v.id)).toEqual(expect.arrayContaining(['aai-alba', 'aai-eve']))
   })
 })

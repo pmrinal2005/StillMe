@@ -5,6 +5,7 @@ import { api, ApiError } from '@/lib/client/api'
 import {
   CONSENT_PERIOD_DAYS,
   LIBRARY_VOICES,
+  libraryVoicesFor,
   clonedVoiceUsable,
   consentExpiry,
   isLibraryVoice,
@@ -49,7 +50,7 @@ export function VoiceWardrobe(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const libraryForLang = LIBRARY_VOICES.filter((v) => v.language === outputLanguage)
+  const libraryForLang = libraryVoicesFor(outputLanguage)
 
   const revoke = async (v: ClonedVoiceProfile) => {
     if (!confirm(`Revoke "${v.label}"? It will no longer be usable in ReVOICE. Delete it in the AssemblyAI dashboard to remove it from the provider.`)) return

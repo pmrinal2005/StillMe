@@ -14,22 +14,46 @@ export interface LibraryVoice {
   description: string
 }
 
+/**
+ * Library voices. Every id below was synthesized against the live AssemblyAI TTS API
+ * (assemblyai-tts-1, us zone) with its listed language — see scripts/live-smoke.mjs.
+ *
+ * Italian has no native catalog voice in the public list, so Italian uses AssemblyAI's built-in voices
+ * (they speak any of the six languages; AssemblyAI notes quality is usually better in the voice's own
+ * language). Each voice id appears ONCE so a radio selection maps to exactly one entry.
+ */
 export const LIBRARY_VOICES: LibraryVoice[] = [
   { id: 'aai-audrey', name: 'Audrey', language: 'english', description: 'Middle-aged woman, even, steady, American English' },
   { id: 'aai-jane', name: 'Jane (default)', language: 'english', description: 'Built-in default voice, English' },
   { id: 'aai-peter', name: 'Peter', language: 'english', description: 'Middle-aged man, soft-spoken, American English' },
   { id: 'aai-sara', name: 'Sara', language: 'english', description: 'Young woman, even intonation, American English' },
   { id: 'aai-titus', name: 'Titus', language: 'english', description: 'Young man, deep voice, American English' },
+  { id: 'aai-aaliyah', name: 'Aaliyah', language: 'english', description: 'Young woman, fairly high-pitched, American English' },
+  { id: 'aai-kyla', name: 'Kyla', language: 'english', description: 'Young woman, fast pace, American English' },
   { id: 'aai-nancy', name: 'Nancy', language: 'english', description: 'Middle-aged woman, even tone, British English' },
+  { id: 'aai-carrie', name: 'Carrie', language: 'english', description: 'Middle-aged woman, soft-spoken, British English' },
+  { id: 'aai-buford', name: 'Buford', language: 'english', description: 'Older man, energetic, British English' },
+  { id: 'aai-troy', name: 'Troy', language: 'english', description: 'Young man, soft-spoken, deep, Scottish English' },
   { id: 'aai-gunnar', name: 'Gunnar', language: 'english', description: 'Older man, fairly slow pace, English' },
   { id: 'aai-steven', name: 'Steven', language: 'english', description: 'Middle-aged man, Australian English' },
   { id: 'aai-constanza', name: 'Constanza', language: 'spanish', description: 'Young woman, Mexican Spanish' },
+  { id: 'aai-malvina', name: 'Malvina', language: 'spanish', description: 'Middle-aged woman, soft-spoken, Mexican Spanish' },
   { id: 'aai-oriol', name: 'Oriol', language: 'spanish', description: 'Middle-aged man, Mexican Spanish' },
+  { id: 'aai-antonioluis', name: 'Antonio Luis', language: 'spanish', description: 'Middle-aged man, deep voice, Mexican Spanish' },
   { id: 'aai-jorg', name: 'Jörg', language: 'german', description: 'Middle-aged man, German' },
+  { id: 'aai-gunther', name: 'Günther', language: 'german', description: 'Middle-aged man, soft-spoken, German' },
   { id: 'aai-magdalena', name: 'Magdalena', language: 'german', description: 'Young woman, German' },
+  { id: 'aai-alba', name: 'Alba', language: 'italian', description: 'Built-in voice speaking Italian (no native Italian catalog voice is listed)' },
+  { id: 'aai-eve', name: 'Eve', language: 'italian', description: 'Built-in voice speaking Italian (no native Italian catalog voice is listed)' },
   { id: 'aai-donatien', name: 'Donatien', language: 'french', description: 'Middle-aged man, French' },
   { id: 'aai-benicio', name: 'Benício', language: 'portuguese', description: 'Young man, Portuguese' },
 ]
+
+/** Library voices to offer for a spoken-output language (never empty: every supported language has at least one). */
+export function libraryVoicesFor(language: OutputLanguage): LibraryVoice[] {
+  const own = LIBRARY_VOICES.filter((v) => v.language === language)
+  return own.length ? own : LIBRARY_VOICES
+}
 
 export const DEFAULT_VOICE_ID = 'aai-audrey'
 export const CONSENT_PERIOD_DAYS = 60

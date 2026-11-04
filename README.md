@@ -53,9 +53,39 @@ I re-checked the B5/B6 changes against the bug reports. The presence state machi
 
 Regression tests: `tests/bugfixes-b7.test.ts` (17) and `tests/phone-cross-instance.test.ts` (4; each step wipes instance memory to simulate a different serverless instance).
 
-**Totals: 137 web tests across 13 suites, 47 worker tests. All pass.** `tsc --noEmit`, `npm run build` and the secret scan are clean.
+**Totals: 140 web tests across 13 suites, 47 worker tests. All pass.** `tsc --noEmit`, `npm run build` and the secret scan are clean.
 
 **Remaining limits (by design, documented):** LiveKit metadata writes are last-writer-wins. Pair and bind for one owner are serialized by the human flow, so a race can at most grant one extra code guess and can never bypass the HMAC. The monthly phone-minute *counter* is durable only with Supabase (`reservePhoneCallDurable`); without Supabase it is per-instance, as documented for the other in-memory ledgers.
+
+## 0d. Live verification against real providers (B1-B7 audit)
+
+I audited B6, B7 and the open phone item against the **deployed site** (`https://stillmee.vercel.app`) and a **full local stack** (`next start` + a real `livekit-server` + the real Python worker) using the real AssemblyAI key. The key is not stored in the repo; `scripts/live-smoke.mjs` reads it from `ASSEMBLYAI_API_KEY`.
+
+| Check | Result |
+|---|---|
+| B1 tabletop + partner-link session start, partner join (JWT carries `canPublishSources:["microphone"]`) | pass (live + local) |
+| B2 stable secret on Vercel (`approvalSecretSource: derived:LIVEKIT_API_SECRET`); an approval signed on one request verifies on the next | pass |
+| B3 STT minutes released/settled on end (reserved 2, committed 1, refunded 1) | pass |
+| B4 room approval and room end using only the signed ticket (no instance memory) | pass |
+| B5 worker presence: worker `ready` seen in the room; with no worker the session auto-ends and speech still works over HTTP TTS | pass (see "Worker not deployed" below) |
+| B6 partner-link: partner can publish mic, owner is never the transcribed track, a partner `speak` control attempt is ignored; replay is `rejected: replayed`; altered text is `rejected: altered_text` | pass (local real worker) |
+| B7 JSON errors on routes (`invalid_request`, `unauthorized`, 403/409 bodies); `/favicon.ico` 200; no console errors on the home page | pass |
+| Stop mid-speech: worker reports `cancelled`, never `done` | pass |
+| AssemblyAI TTS `assemblyai-tts-1`: all 24 library voices synthesize in their listed language; `hindi` is rejected (422) | pass |
+| AssemblyAI STT `universal-3-6-pro`: TTS audio to streaming STT returns the same words (EN, ES, DE, FR, IT); `language_codes`, `keyterms_prompt`, `prompt` accepted | pass |
+| LiveKit AssemblyAI **plugin** (BYOK) `STT` and `TTS` (synthesize + stream) with the worker's exact parameters | pass |
+| Groq `/api/suggest` returns three differentiated candidates; a spoken prompt-injection is treated as data and not obeyed | pass |
+| Cloned voice without consent attestation: 403; wrong room: 403; browser STT tokens disabled: 403 | pass |
+
+**Defect found and fixed:** Italian output had **no library voice**, so the wardrobe fell back to a mixed list. The live API showed the built-in voices (`aai-alba`, `aai-eve`) speak Italian and the STT round trip is exact, so Italian now lists them. The wardrobe now lists only voices verified live (added Aaliyah, Kyla, Carrie, Buford, Troy, Malvina, Antonio Luis, Guenther). Tests: `tests/voices.test.ts` (+3).
+
+**Worker not deployed (action for you):** on the live site the LiveKit room is created but no agent joins, because the Python worker is not running on LiveKit Cloud for project `stillme-6jxw4xpq` (or its secrets are missing). Listening and captions cannot work there until it is deployed. Typed speech still works through HTTP TTS, and a session auto-ends after 45 s. Deploy from `worker/` (`lk cloud auth`, `lk agent create`, agent secrets in section 11). The same worker code was confirmed end to end against a local LiveKit server.
+
+**Re-run the live checks any time** (about 75 TTS characters and 10 s of STT, far below the $2 phase-0 envelope):
+
+```
+ASSEMBLYAI_API_KEY=... REVOICE_BASE_URL=https://stillmee.vercel.app npm run smoke:live
+```
 
 ## 1. Current status
 
@@ -72,7 +102,7 @@ Regression tests: `tests/bugfixes-b7.test.ts` (17) and `tests/phone-cross-instan
 | Python worker: BYOK STT/TTS, approval check, track filter, Stop/pause, watchdogs, phone binding | ✅ code + 37 pytest |
 | Phone bridge: pair code (works across serverless instances via LiveKit room metadata), 40 min/month cap, 15 min/call, worker HMAC; reconciliation route; migration 0002 | ✅ (off by default) |
 | Message bank, metrics panel, privacy (export/delete), reconciliation panel | ✅ |
-| Vitest: 137 tests across 13 suites (incl. B1–B4, B5–B6, B7 and cross-instance phone regressions) · pytest: 47 worker tests | ✅ all passing |
+| Vitest: 140 tests across 13 suites (incl. B1–B4, B5–B6, B7 and cross-instance phone regressions) · pytest: 47 worker tests | ✅ all passing |
 | Build-time secret scan (fails the build on a leak) | ✅ |
 | axe-core WCAG 2.1 AA + best-practice: home, join, dark/reduced-motion, mobile | ✅ 0 violations |
 | **Frontend rebuilt (v2 "iridescent glass")**: side rail, animated liquid orb that mirrors listening/drafting/speaking/holding states, quick-action chips, iridescent composer, glass suggestion cards with shimmer while drafting, caption bubbles, tile phrase boards, glass partner join page | ✅ logic unchanged; axe 0 violations on 11 page/mode/viewport cases |
@@ -138,7 +168,7 @@ npm ci
 cp .env.example .env.local        # fill in keys; leave blank to run in local-demo mode
 npm run build                     # postbuild runs the secret scan
 pm2 start ecosystem.config.cjs    # next start on 0.0.0.0:3000
-npm test                          # 77 Vitest tests (providers mocked)
+npm test                          # 140 Vitest tests (providers mocked)
 ```
 Without keys the app still runs as a typed AAC tool: phrase boards, large text and device voice. Cloud voice, suggestions and listening show as unavailable.
 
@@ -146,7 +176,7 @@ Without keys the app still runs as a typed AAC tool: phrase boards, large text a
 ```bash
 cd worker && python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q                         # 37 tests, no network
+pytest -q                         # 47 tests, no network
 # Deploy to LiveKit Cloud Build using worker/Dockerfile; set worker/.env.example values as secrets.
 ```
 
@@ -197,7 +227,7 @@ Presentation-only changes; no app logic changed. Tested in Chromium at 320×568 
 
 ## 7. Known limitations
 - Single-instance memory stores (replay set, ledgers, sessions) are used unless Supabase service credentials are configured. On serverless or multi-instance hosting, back them with the provided tables.
-- No live provider calls have been made from this build. Latency targets (<500 ms warm approval-to-audio p50, <150 ms local Stop) are **untested**.
+- Live provider calls were made in the section 0d audit (TTS, STT, Groq, LiveKit). Browser-to-speaker latency targets (<500 ms warm approval-to-audible p50, <150 ms local Stop on real devices) remain **untested**; the worker measured 43-65 ms to first TTS audio in a local room.
 - Hindi/Hinglish is supported as STT **input** only. TTS output covers English, Spanish, German, Italian, Portuguese and French only.
 - No documented TTS controls for pitch, speed or emotion; ReVOICE does not invent any.
 - Clones are created in the AssemblyAI dashboard only; there is no API clone creation. Consent expires 60 days after it was last given and must be renewed affirmatively.
@@ -288,7 +318,7 @@ None of these can be done from code. Do them in order. Without any keys the app 
 ### Step 6 — Run locally
 1. Run `npm run build`. The build fails if any secret leaks into browser files.
 2. Start it with `npm start` (or `pm2 start ecosystem.config.cjs`), then open http://localhost:3000.
-3. Run the tests: `npm test` (77 tests) and `cd worker && pytest -q` (37 tests).
+3. Run the tests: `npm test` (140 tests) and `cd worker && pytest -q` (47 tests).
 4. Microphone and audio need HTTPS or `localhost`. Test on a phone through your deployed Vercel URL.
 
 ### Step 7 — Deploy the frontend to Vercel Hobby
