@@ -8,6 +8,8 @@ import { ApprovalError, issueApproval } from '@/lib/approval'
 import { materialChange } from '@/lib/turns'
 import { clonedVoiceUsable, isLibraryVoice } from '@/lib/voices'
 import { withJsonErrors } from '@/lib/server/route'
+import { reserveTtsSpend } from '@/lib/server/spend'
+import { workerTtsRef } from '@/lib/spend-refs'
 
 export const dynamic = 'force-dynamic'
 
