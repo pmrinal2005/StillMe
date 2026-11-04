@@ -1,6 +1,6 @@
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { ledgerFor, projectLedger } from '@/lib/server/state'
+import { guestPoolLedger, ledgerFor, projectLedger } from '@/lib/server/state'
 import { durableReplay, recordUsage, reserveDurable, settleDurable } from '@/lib/server/durable'
 import { logEvent } from '@/lib/server/log'
 import { PRICES } from '@/lib/budget'
@@ -43,11 +43,20 @@ async function handlePOST(req: Request) {
     ledgerFor(id.userId).releaseTts(user.id)
     return json({ error: 'budget', reason: proj.reason }, 429)
   }
+  // B8: guests also draw from one shared guest pool.
+  const pool = id.kind === 'guest' ? guestPoolLedger().reserveTts(chars) : null
+  if (pool && !pool.ok) {
+    ledgerFor(id.userId).releaseTts(user.id)
+    projectLedger().releaseTts(proj.id)
+    return json({ error: 'budget', reason: 'guest_pool', message: 'Guest voice allowance is used up for today. Sign in for more.' }, 429)
+  }
+  const poolId = pool?.ok ? pool.id : undefined
   // Durable, cross-instance transactional reservation (Supabase) — intersects with the in-memory ledgers.
   const durable = await reserveDurable(id.userId, 'assemblyai_tts', chars)
   if (durable && !durable.ok) {
     ledgerFor(id.userId).releaseTts(user.id)
     projectLedger().releaseTts(proj.id)
+    if (poolId) guestPoolLedger().releaseTts(poolId)
     return json({ error: 'budget', reason: durable.reason }, 429)
   }
   const durableId = durable?.ok ? durable.id : undefined
@@ -63,6 +72,7 @@ async function handlePOST(req: Request) {
     })
     ledgerFor(id.userId).commitTts(user.id, r.billedChars)
     projectLedger().commitTts(proj.id, r.billedChars)
+    if (poolId) guestPoolLedger().commitTts(poolId, r.billedChars)
     const billed = r.billedChars ?? chars
     await settleDurable(durableId, true, billed, billed * PRICES.ttsPerChar)
     // Content-free usage log (no text).

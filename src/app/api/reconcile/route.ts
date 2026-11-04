@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, unauthorized, type Identity } from '@/lib/server/auth'
+import { getIdentity, json, requireAccount, unauthorized, type Identity } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { monthKey, phoneMonthUsed, projectLedger, rv } from '@/lib/server/state'
 import { adminClient, audit, usageSummary } from '@/lib/server/durable'
@@ -47,6 +47,7 @@ async function appEstimate() {
 async function handleGET(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'reconciliation'); if (gate) return gate }
   if (!isOperator(id)) return json({ error: 'forbidden' }, 403)
   const estimate = await appEstimate()
   let recorded: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string; at: number }[] = rv().reconciliations.map((r) => ({ ...r }))
@@ -62,6 +63,7 @@ async function handleGET(req: Request) {
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'reconciliation'); if (gate) return gate }
   if (!isOperator(id)) return json({ error: 'forbidden' }, 403)
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request', issues: parsed.error.issues.slice(0, 5) }, 400)

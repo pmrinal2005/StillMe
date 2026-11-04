@@ -36,6 +36,27 @@ export const LIMITS = {
   },
 } as const
 
+type Widen<T> = { -readonly [K in keyof T]: T[K] extends number ? number : Widen<T[K]> }
+/** Same shape as LIMITS with plain numbers, so reduced ledgers (e.g. guests) can be constructed. */
+export type Limits = Widen<typeof LIMITS>
+
+/**
+ * B8: guest limits (Supabase configured but visitor not signed in). Guests may type and speak with
+ * library voices and receive suggestions, within much smaller caps. Listening sessions, cloned
+ * voices, phone and reconciliation still require a real account.
+ */
+export const GUEST_LIMITS: Limits = {
+  groq: { ...LIMITS.groq, requestsPerDay: 30, dailyTokens: 20_000, requestsPerMinute: 4 },
+  assembly: { ...LIMITS.assembly, dailyTtsChars: 1_000, dailyUsd: 0.05, interactiveSessionMinutes: 0, dailyFlagshipListeningMinutes: 0 },
+  livekit: { ...LIMITS.livekit },
+}
+/** Shared pool across ALL guests on an instance (clearing cookies does not grant more). */
+export const GUEST_POOL_LIMITS: Limits = {
+  groq: { ...LIMITS.groq, requestsPerDay: 120, dailyTokens: 60_000, requestsPerMinute: 6, outstandingPerConversation: 4, callsPerPartnerTurn: 2 },
+  assembly: { ...LIMITS.assembly, dailyTtsChars: 4_000, dailyUsd: 0.1, interactiveSessionMinutes: 0, dailyFlagshipListeningMinutes: 0 },
+  livekit: { ...LIMITS.livekit },
+}
+
 export function estimateAssemblyUsd(u: { flagshipHours?: number; economyHours?: number; ttsChars?: number }): number {
   return (
     (u.flagshipHours ?? 0) * PRICES.sttFlagshipPerHour +
@@ -89,7 +110,7 @@ export class BudgetLedger {
   /** Lifetime spend estimate across days (for reserve protection). Seed from DB in production. */
   public lifetimeUsd = 0
 
-  constructor(private limits = LIMITS) {}
+  constructor(private limits: Limits = LIMITS) {}
 
   private state(now: number, key?: string): DayState {
     const day = key ?? dayKey(now)

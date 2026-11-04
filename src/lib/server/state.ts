@@ -1,5 +1,5 @@
 import 'server-only'
-import { BudgetLedger } from '../budget'
+import { BudgetLedger, GUEST_LIMITS, GUEST_POOL_LIMITS } from '../budget'
 import { MemoryReplayStore } from '../approval'
 import type { TurnRef } from '../contracts'
 
@@ -57,12 +57,16 @@ if (!g.__rv) {
 export function ledgerFor(userId: string): BudgetLedger {
   let l = g.__rv!.ledgers.get(userId)
   if (!l) {
-    l = new BudgetLedger()
+    // B8: guests get much smaller per-device caps.
+    l = new BudgetLedger(userId.startsWith('guest-') ? GUEST_LIMITS : undefined)
     g.__rv!.ledgers.set(userId, l)
   }
   return l
 }
 export const projectLedger = () => g.__rv!.projectLedger
+/** B8: one shared pool for ALL guests, so clearing cookies cannot mint unlimited guest budget. */
+const gp = globalThis as unknown as { __rvGuestPool?: BudgetLedger }
+export const guestPoolLedger = () => (gp.__rvGuestPool ??= new BudgetLedger(GUEST_POOL_LIMITS))
 export const replayStore = () => g.__rv!.replay
 
 export const turnKey = (r: Pick<TurnRef, 'conversationId' | 'generation' | 'turnId'>) => `${r.conversationId}:${r.generation}:${r.turnId}`

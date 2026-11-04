@@ -406,12 +406,21 @@ html[data-contrast="high"] .rv-orb-ring { border-color: #ffd400; }
   border-color: rgba(184, 40, 122, 0.25);
   box-shadow: var(--shadow-sm);
 }
-.rv-rail-btn .rv-tip {
-  position: absolute; left: calc(100% + 0.6rem); top: 50%; transform: translate(-4px, -50%);
-  white-space: nowrap; font-size: 0.78rem; font-weight: 650; padding: 0.3rem 0.6rem; border-radius: 0.6rem;
-  background: #1d1a2b; color: #fff; opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s; z-index: 60;
+/* B9: rail tooltip is portalled to <body> with position:fixed, so no stacking context, overflow or
+   column border can cover or clip it (it used to render behind <main> and show only "Vo…"). */
+.rv-floating-tip {
+  position: fixed; z-index: 2147483000; pointer-events: none; white-space: nowrap; max-width: calc(100vw - 8px);
+  font-size: 0.8rem; font-weight: 650; line-height: 1.2; padding: 0.35rem 0.65rem; border-radius: 0.6rem;
+  background: #1d1a2b; color: #fff; box-shadow: 0 8px 24px rgba(29, 26, 43, 0.28);
+  animation: rv-tip-in .14s ease-out both;
 }
-.rv-rail-btn:hover .rv-tip, .rv-rail-btn:focus-visible .rv-tip { opacity: 1; transform: translate(0, -50%); }
+.rv-floating-tip::before {
+  content: ""; position: absolute; top: 50%; width: 8px; height: 8px; background: inherit; transform: translateY(-50%) rotate(45deg);
+}
+.rv-floating-tip[data-placement="right"]::before { left: -4px; }
+.rv-floating-tip[data-placement="left"]::before { right: -4px; }
+@keyframes rv-tip-in { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+html[data-contrast="high"] .rv-floating-tip { background: #000; color: #fff; border: 2px solid #ff0; box-shadow: none; }
 html[data-contrast="high"] .rv-rail-btn { color: #fff; border: 2px solid #fff; }
 html[data-contrast="high"] .rv-rail-btn[aria-current="page"] { background: #fff; color: #000; }
 
@@ -503,6 +512,7 @@ html[data-contrast="high"] .rv-overlay { background: #000; }
 @keyframes rv-stop-pulse { 0%, 100% { box-shadow: 0 10px 26px -10px rgba(180,35,50,.6), 0 0 0 0 rgba(180,35,50,.45); } 50% { box-shadow: 0 10px 26px -10px rgba(180,35,50,.6), 0 0 0 10px rgba(180,35,50,0); } }
 
 @media (prefers-reduced-motion: reduce) {
+  .rv-floating-tip { animation: none; }
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
 html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-motion="reduced"] *::after { transition: none !important; animation: none !important; }
@@ -539,6 +549,15 @@ body { min-height: 100dvh; }
 .rv-stop { min-height: var(--stop-h); font-size: clamp(1.05rem, 0.9rem + 0.8vw, 1.25rem); white-space: nowrap; overflow: hidden; }
 .rv-stop .truncate { min-width: 0; }
 
+/* B9: the rail column sits above the canvas (its shadows/focus rings are never cut by <main>). */
+@media (min-width: 1024px) { .rv-rail-wrap { position: sticky; z-index: 20; } .rv-rail { overflow: visible; } }
+
+/* B8: sign-in panel floats above every panel */
+.rv-auth-panel {
+  position: absolute; right: 0; top: calc(100% + 0.5rem); z-index: 70; width: min(22rem, calc(100vw - 2rem));
+}
+@media (max-width: 639px) { .rv-auth-panel { position: fixed; left: 1rem; right: 1rem; top: 4.5rem; width: auto; } }
+
 /* ---------------------------------------------------------------- rail → labelled tab bar below lg */
 .rv-rail-label { display: none; }
 @media (max-width: 1023px) {
@@ -561,7 +580,6 @@ body { min-height: 100dvh; }
     scroll-snap-align: start; flex: none;
   }
   .rv-rail-label { display: block; font-size: 0.68rem; font-weight: 700; line-height: 1.1; letter-spacing: 0.01em; white-space: nowrap; }
-  .rv-rail-btn .rv-tip { display: none; }
   .rv-rail-btn:hover { transform: none; }
 }
 @media (min-width: 640px) and (max-width: 1023px) {

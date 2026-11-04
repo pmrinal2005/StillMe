@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { activeSession, ledgerFor, projectLedger, rv, settleLocalStt } from '@/lib/server/state'
 import { createRoomAndDispatch, deleteRoom, listOwnerRooms, newRoomName, ownerToken, signInvite } from '@/lib/server/livekit'
@@ -42,6 +42,7 @@ async function closeExisting(userId: string, room: string, ticket: string | null
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'listening sessions'); if (gate) return gate }
   if (!env.livekitUrl() || !env.livekitKey() || !env.livekitSecret()) return json({ error: 'livekit_not_configured' }, 503)
   const raw = await req.json().catch(() => null)
   const parsed = Body.safeParse(raw)

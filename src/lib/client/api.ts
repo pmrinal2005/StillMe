@@ -94,7 +94,7 @@ export const api = {
 }
 
 export interface StatusResponse {
-  identity: { userId: string; kind: 'supabase' | 'local-demo' }
+  identity: { userId: string; kind: 'supabase' | 'local-demo' | 'guest' }
   providers: {
     assemblyai: boolean; groq: boolean; livekit: boolean; supabase: boolean; durableStore: boolean
     browserStt: boolean; phoneInbound?: boolean; approvalSecretConfigured: boolean; region: 'us' | 'eu'; groqModel: string

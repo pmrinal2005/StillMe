@@ -121,6 +121,8 @@ if (BASE) {
   }
   const sha = (t) => createHash('sha256').update(t.normalize('NFC')).digest('hex')
   const st = await (await call('/api/status')).json()
+  if (st.identity) ok('identity resolved', st.identity.kind)
+  else bad('status', JSON.stringify(st).slice(0, 120))
   st.providers?.assemblyai ? ok('server has AssemblyAI configured') : bad('server missing ASSEMBLYAI_API_KEY')
   st.providers?.approvalSecretConfigured ? ok('stable approval secret', st.providers.approvalSecretSource) : bad('approval secret unstable')
 
@@ -128,16 +130,32 @@ if (BASE) {
   const ap = await (await call('/api/approve', { text, textHash: sha(text), conversationId: 'smoke-' + Date.now(), generation: 0, voiceId: 'aai-audrey', outputLanguage: 'english' })).json()
   if (!ap.approval) bad('approve', JSON.stringify(ap).slice(0, 120))
   else {
-    const sp = await call('/api/speak', { approval: ap.approval, text })
+    let sp = await call('/api/speak', { approval: ap.approval, text })
+    if (sp.status === 429) {
+      // Provider rate limit right after the voice sweep above: wait, then retry with a FRESH approval.
+      const wait = Math.min(15, Number(sp.headers.get('retry-after')) || 8)
+      console.log(`     429 from /api/speak (${(await sp.text()).slice(0, 80)}); retrying in ${wait}s`)
+      await new Promise((r) => setTimeout(r, wait * 1000))
+      const ap2 = await (await call('/api/approve', { text, textHash: sha(text), conversationId: 'smoke-r-' + Date.now(), generation: 0, voiceId: 'aai-audrey', outputLanguage: 'english' })).json()
+      ap.approval = ap2.approval
+      sp = await call('/api/speak', { approval: ap.approval, text })
+    }
     const len = sp.ok ? (await sp.arrayBuffer()).byteLength : 0
-    sp.ok && len > 10_000 ? ok('speak streams PCM', `${len} bytes`) : bad('speak', `HTTP ${sp.status}`)
+    sp.ok && len > 10_000 ? ok('speak streams PCM', `${len} bytes`) : bad('speak', `HTTP ${sp.status} ${sp.ok ? '' : await sp.text().catch(() => '')}`)
     const replay = await call('/api/speak', { approval: ap.approval, text })
     replay.status === 409 ? ok('replayed approval rejected') : bad('replay should be 409', `HTTP ${replay.status}`)
     const alt = await call('/api/speak', { approval: ap.approval, text: 'Tampered words' })
     alt.status === 409 ? ok('altered text rejected') : bad('altered text should be 409', `HTTP ${alt.status}`)
   }
   const clone = await call('/api/approve', { text: 'Test', textHash: sha('Test'), conversationId: 'smoke-c', generation: 0, voiceId: 'unregistered-clone', outputLanguage: 'english' })
-  clone.status === 403 ? ok('unregistered cloned voice refused') : bad('clone should be 403', `HTTP ${clone.status}`)
+  // 403 voice_not_authorized (signed in) or 401 account_required (guest, B8) are both correct refusals.
+  const cb = await clone.json().catch(() => ({}))
+  clone.status === 403 || (clone.status === 401 && cb.error === 'account_required') ? ok('unregistered cloned voice refused', `HTTP ${clone.status} ${cb.error ?? ''}`) : bad('clone should be refused', `HTTP ${clone.status}`)
+  if (st.identity?.kind === 'guest') {
+    const ls = await call('/api/livekit/session', {})
+    const lb = await ls.json().catch(() => ({}))
+    ls.status === 401 && lb.error === 'account_required' ? ok('guest cannot start a billed listening session') : bad('guest listening should be refused', `HTTP ${ls.status}`)
+  }
   const junk = await call('/api/speak', 'not json')
   const jb = await junk.json().catch(() => null)
   junk.status === 400 && jb?.error ? ok('malformed body -> JSON error') : bad('malformed body', `HTTP ${junk.status}`)

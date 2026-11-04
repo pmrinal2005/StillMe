@@ -1,4 +1,4 @@
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { phoneMonthUsed, rv } from '@/lib/server/state'
 import { resolveCurrentSession, ticketFrom } from '@/lib/server/session'
@@ -19,6 +19,7 @@ export const dynamic = 'force-dynamic'
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'the phone bridge'); if (gate) return gate }
   if (!env.phoneInboundEnabled() || !env.livekitUrl()) return json({ error: 'phone_disabled' }, 503)
   const s = await resolveCurrentSession(id.userId, ticketFrom(req)).catch(() => null) // B4: ticket, not instance memory
   if (!s) return json({ error: 'no_active_session', message: 'Start a listening session first.' }, 409)
@@ -46,6 +47,7 @@ async function handlePOST(req: Request) {
 async function handleDELETE(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'the phone bridge'); if (gate) return gate }
   for (const [k, c] of rv().phoneCodes) if (c.userId === id.userId) rv().phoneCodes.delete(k)
   if (env.livekitUrl() && env.livekitKey() && env.livekitSecret()) await revokePairCodes(await livekitRoomStore(), id.userId)
   return json({ ok: true })

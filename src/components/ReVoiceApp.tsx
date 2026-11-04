@@ -34,7 +34,9 @@ import { PRESENCE_LABELS, WorkerPresenceMonitor, type PresenceSnapshot } from '@
 import { effectiveMode, modeAvailable } from '@/lib/session-mode'
 import { fallbackAudibleToPartner, fallbackNotice, OWNER_FALLBACK_GATES_WORKER } from '@/lib/audio-routing'
 import { count, noteTts, recordInterval } from '@/lib/client/metrics'
-import { getSupabase, signInWithOAuth } from '@/lib/client/supabase'
+import { getSupabase } from '@/lib/client/supabase'
+import { AuthControls } from './AuthControls'
+import { FloatingTip, useFloatingTip } from './ui/FloatingTip'
 import { TurnTracker, type PartnerTurn } from '@/lib/turns'
 import { partnerIsSpeaking, type OutputState } from '@/lib/output-state'
 import { CandidateSet as CandidateSetSchema, INPUT_LANGUAGES, type Candidate, type CandidateSet, type TurnRef } from '@/lib/contracts'
@@ -706,7 +708,8 @@ export function ReVoiceApp() {
   const cloudVoiceDown = !status?.providers.assemblyai || !online || output.kind === 'error'
   const elapsedMin = session ? Math.floor((Date.now() - session.startedAt) / 60000) : 0
   const inviteUrl = session?.invite ? `${typeof window !== 'undefined' ? window.location.origin : ''}/join#${encodeURIComponent(session.invite)}` : null
-  const listenAvailable = !!(status?.providers.livekit || status?.providers.browserStt)
+  const isGuest = status?.identity.kind === 'guest'
+  const listenAvailable = !!(status?.providers.livekit || status?.providers.browserStt) && !isGuest
   const orbState: OrbState = !online ? 'offline'
     : speaking ? 'speaking'
       : holding ? 'holding'
@@ -722,6 +725,7 @@ export function ReVoiceApp() {
             : listening === 'paused' ? 'Listening paused'
               : 'Ready when you are'
   const home = tab === 'session'
+  const railTip = useFloatingTip()
   const goPanel = (k: Tab) => {
     setTab(k)
     requestAnimationFrame(() => document.getElementById(k === 'session' ? 'composer-input' : `panel-${k}`)?.focus({ preventScroll: false }))
@@ -738,22 +742,21 @@ export function ReVoiceApp() {
             <span className="rv-rail-logo lg:hidden"><Logo size={36} /></span>
             <div className="rv-rail-items flex flex-row gap-1 lg:mt-auto lg:flex-col lg:gap-2">
               {RAIL.map(([k, label, icon, short]) => (
-                <button key={k} className="rv-rail-btn" aria-current={tab === k ? 'page' : undefined} aria-label={label} onClick={() => goPanel(k)}>
+                <button key={k} className="rv-rail-btn" aria-current={tab === k ? 'page' : undefined} aria-label={label} onClick={() => goPanel(k)} {...railTip.bind(label)}>
                   <Icon name={icon} size={20} />
                   <span className="rv-rail-label" aria-hidden="true">{short}</span>
-                  <span className="rv-tip" aria-hidden="true">{label}</span>
                 </button>
               ))}
             </div>
             <div className="ml-auto lg:ml-0 lg:mt-auto">
-              <button className="rv-rail-btn" aria-label="Show large text for your partner" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)}>
+              <button className="rv-rail-btn" aria-label="Show large text for your partner" disabled={!composer.trim() && !lastSpoken} onClick={() => setLargeText(true)} {...railTip.bind('Large text')}>
                 <Icon name="expand" size={20} />
                 <span className="rv-rail-label" aria-hidden="true">Large</span>
-                <span className="rv-tip" aria-hidden="true">Large text</span>
               </button>
             </div>
           </nav>
         </aside>
+        <FloatingTip tip={railTip.tip} />
 
         {/* ------------------------------------------------ main canvas */}
         <main id="revoice-app" className="rv-canvas relative min-w-0 flex-1 overflow-hidden px-3 py-4 sm:px-6 sm:py-6 lg:px-8">
@@ -965,7 +968,8 @@ export function ReVoiceApp() {
                         <button data-scan className="rv-btn rv-btn-primary" onClick={startSession} disabled={!online || !listenAvailable}>
                           <Icon name="headphones" size={17} /> Start listening
                         </button>
-                        {status && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
+                        {isGuest && <p className="rv-alert rv-alert-warn text-sm" role="status"><Icon name="user" size={15} /> Listening sessions need an account (they bill live transcription time). Use <strong>Sign in</strong> at the top. Typing, phrases and voices work as a guest.</p>}
+                        {status && !isGuest && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
                       </>
                     ) : (
                       <>
@@ -1077,17 +1081,3 @@ const MODES: [Mode, string, string, IconName][] = [
   ['remote', 'Remote call', 'Browser call with a remote partner.', 'globe'],
 ]
 
-function AuthControls({ needsSignIn, status }: { needsSignIn: boolean; status: StatusResponse | null }) {
-  const sb = getSupabase()
-  if (!sb) return <span className="rv-badge"><Icon name="user" size={13} /> Local prototype</span>
-  if (needsSignIn) {
-    return (
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="rv-muted w-full sm:w-auto">Sign in for voice & suggestions (typing and phrases work without it):</span>
-        <button className="rv-btn" onClick={() => void signInWithOAuth('github')}><Icon name="plus" size={15} /> GitHub</button>
-        <button className="rv-btn" onClick={() => void signInWithOAuth('google')}><Icon name="plus" size={15} /> Google</button>
-      </div>
-    )
-  }
-  return status?.identity.kind === 'supabase' ? <button className="rv-btn text-sm" onClick={() => void sb.auth.signOut()}><Icon name="logout" size={15} /> Sign out</button> : null
-}

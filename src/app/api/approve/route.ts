@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { getCandidates, latestTurn } from '@/lib/server/state'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
@@ -41,12 +41,14 @@ async function handlePOST(req: Request) {
   // B4: verified via the signed session ticket (works on any serverless instance), falling back
   // to this instance's cache and then LiveKit's server-set room metadata — never memory alone.
   if (body.roomName) {
+    { const gate = requireAccount(id, 'listening sessions'); if (gate) return gate }
     const s = await resolveOwnedSession(id.userId, body.roomName, ticketFrom(req, { ticket })).catch(() => null)
     if (!s || s.expired || s.conversationId !== body.conversationId || s.generation !== body.generation) return json({ error: 'wrong_room' }, 403)
   }
 
   // Voice authorization: library voices are allowed; cloned voices require complete, unexpired consent.
   if (!isLibraryVoice(body.voiceId)) {
+    { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
     if (!voice || voice.voiceId !== body.voiceId) {
       return json({ error: 'voice_not_authorized', message: 'Register this cloned voice with consent details first.' }, 403)
     }

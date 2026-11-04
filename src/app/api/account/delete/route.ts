@@ -15,6 +15,7 @@ async function handlePOST(req: Request) {
   if (!id) return unauthorized()
   forgetUser(id.userId)
   if (id.kind === 'local-demo') (await cookies()).delete('rv_demo')
+  if (id.kind === 'guest') (await cookies()).delete('rv_guest')
   return json({
     ok: true,
     thirdPartyActions: [

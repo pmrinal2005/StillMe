@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { ttsBase } from '@/lib/server/assemblyai'
 import { ledgerFor } from '@/lib/server/state'
@@ -22,6 +22,7 @@ const Body = z.object({
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
   const key = env.assemblyKey()
   if (!key) return json({ error: 'assemblyai_not_configured' }, 503)
   const parsed = Body.safeParse(await req.json().catch(() => null))

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { ledgerFor, projectLedger } from '@/lib/server/state'
 import { mintSttToken, sttWsUrl } from '@/lib/server/assemblyai'
@@ -23,6 +23,7 @@ const Body = z.object({
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  { const gate = requireAccount(id, 'listening'); if (gate) return gate }
   if (!env.allowBrowserStt()) return json({ error: 'browser_stt_disabled' }, 403)
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
