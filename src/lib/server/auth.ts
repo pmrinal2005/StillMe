@@ -7,8 +7,14 @@ import { hmacSha256Hex, randomId, timingSafeEqualHex } from '../hash'
 export interface Identity {
   userId: string
   email?: string
+  /** B13: the e-mail was confirmed by Supabase (required for e-mail based operator access). */
+  emailVerified?: boolean
+  /** B14: this visitor signed in through Supabase ANONYMOUS auth. They are always `kind: 'guest'`. */
+  anonymous?: boolean
+  /** B14/B19: the underlying Supabase auth user id of an anonymous guest (used only to delete that user). */
+  authUserId?: string
   /**
-   * 'supabase'   = verified Supabase session (OAuth, email link or anonymous).
+   * 'supabase'   = verified, NON-anonymous Supabase session (OAuth or e-mail).
    * 'local-demo' = signed device cookie, used only when Supabase is not configured.
    * 'guest'      = B8: Supabase IS configured but the visitor has not signed in. Signed device cookie
    *                with much smaller budgets; listening, cloned voices, phone and reconciliation are refused.
@@ -55,13 +61,39 @@ export async function getIdentity(req: Request): Promise<Identity | null> {
     const sb = createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } })
     const { data, error } = await sb.auth.getUser(token)
     if (error || !data.user) return null
-    return { userId: data.user.id, email: data.user.email ?? undefined, kind: 'supabase' }
+    const u = data.user
+    // B14: Supabase ANONYMOUS sign-in is a guest, never a full account. It used to get full budgets, listening,
+    // cloned voices, phone and reconciliation. Its pseudo id carries the `guest-` prefix so every guest ledger,
+    // the shared guest pool and the durable guest subject (IP-keyed) apply, and it can't collide with a real uuid.
+    if (isAnonymousSupabaseUser(u)) {
+      if (!guestModeEnabled()) return null
+      const pseudo = (await hmacSha256Hex(env.approvalSecret(), `anon-guest:${u.id}`)).slice(0, 24)
+      return { userId: `guest-anon-${pseudo}`, kind: 'guest', anonymous: true, authUserId: u.id }
+    }
+    return { userId: u.id, email: u.email ?? undefined, emailVerified: !!u.email_confirmed_at, kind: 'supabase' }
   }
   return signedDeviceIdentity(DEMO_COOKIE, 'demo', 'demo', 'local-demo')
 }
 
 export const GUEST_COOKIE_NAME = GUEST_COOKIE
 
+/** B14: pure check (exported for tests). Supabase marks anonymous users with `is_anonymous` (and provider `anonymous`). */
+export function isAnonymousSupabaseUser(u: { is_anonymous?: boolean; app_metadata?: { provider?: string; providers?: string[] } | null }): boolean {
+  if (u.is_anonymous === true) return true
+  const m = u.app_metadata
+  return m?.provider === 'anonymous' || (Array.isArray(m?.providers) && m.providers.length > 0 && m.providers.every((p) => p === 'anonymous'))
+}
+
+/**
+ * B13: operator = a real (non-anonymous, non-guest) Supabase account that the deployment owner explicitly listed in
+ * REVOICE_OPERATOR_IDS, or whose VERIFIED e-mail is in REVOICE_OPERATOR_EMAILS. With both lists empty NOBODY is an
+ * operator (fail closed) — "empty list = everyone" let any anonymous account read project spend and post figures.
+ */
+export function isOperator(id: Identity): boolean {
+  if (id.kind !== 'supabase' || id.anonymous) return false
+  if (env.operatorIds().includes(id.userId)) return true
+  return !!id.email && !!id.emailVerified && env.operatorEmails().includes(id.email.toLowerCase())
+}
 /** Features that need a real account (cost or consent sensitive). Returns a 401 JSON response for guests. */
 export function requireAccount(id: Identity, feature: string): Response | null {
   if (id.kind !== 'guest') return null

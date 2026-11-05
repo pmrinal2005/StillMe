@@ -59,8 +59,19 @@ export const env = {
   /** Included US number only — the owner enables this ONLY if activation requires no new spending. */
   phoneInboundEnabled: () => opt('REVOICE_PHONE_INBOUND_ENABLED') === 'true',
   phoneNumberDisplay: () => opt('REVOICE_PHONE_NUMBER_DISPLAY'),
-  /** Comma-separated user ids allowed to record provider reconciliations (empty = any signed-in owner of this deployment). */
+  /**
+   * B13: operators (spend reconciliation + operator status detail). FAIL CLOSED: when BOTH lists are empty
+   * nobody is an operator. (It used to mean "every account", including anonymous Supabase sign-ins.)
+   * Comma-separated Supabase user ids and/or VERIFIED e-mail addresses of real (non-anonymous) accounts.
+   */
   operatorIds: () => (opt('REVOICE_OPERATOR_IDS') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+  operatorEmails: () => (opt('REVOICE_OPERATOR_EMAILS') ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  /**
+   * B11: optional allowlist of who may BIND a cloned voice id to their account (user ids or verified e-mails).
+   * Empty = any signed-in, non-guest account may register (the AssemblyAI account is shared, so ownership is
+   * "first verified claim"; set this to let only the deployment owner decide who can claim a clone).
+   */
+  cloneRegistrants: () => (opt('REVOICE_CLONE_REGISTRANTS') ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   /**
    * HMAC secret for approvals, invites, demo identity, session tickets and worker→app auth.
    *
