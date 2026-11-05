@@ -278,7 +278,7 @@ None of these can be done from code. Do them in order. Without any keys the app 
    - Project URL → `NEXT_PUBLIC_SUPABASE_URL`
    - `anon` public key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `service_role` key → `SUPABASE_SERVICE_ROLE_KEY` (**server only**; never put it in a `NEXT_PUBLIC_` variable)
-3. Open **SQL Editor**, then paste and run `supabase/migrations/0001_init.sql`, then `0002_phone_reconcile.sql`.
+3. Open **SQL Editor**, then paste and run `supabase/migrations/0001_init.sql`, then `0002_phone_reconcile.sql`, then `0003_spend_control.sql` (A-series budget/spend control; until applied the app falls back to the legacy reserve_budget RPCs and `/api/status` reports `spendStore: "legacy"`).
 4. Set up OAuth sign-in. Default email sign-in is limited to 2 emails per hour, so don't rely on it.
    - **GitHub:** at https://github.com/settings/developers choose **New OAuth App**. Set Homepage URL to your site URL, and the callback URL to `https://<your-project-ref>.supabase.co/auth/v1/callback`. Copy the Client ID and Secret into Supabase **Authentication → Providers → GitHub** and enable it.
    - **Google (optional):** in Google Cloud Console go to **APIs & Services → Credentials → Create OAuth client ID** (Web). Use the same Supabase callback URL as the authorized redirect URI. Paste the ID and secret into Supabase **Providers → Google**.
