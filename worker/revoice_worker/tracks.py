@@ -28,15 +28,13 @@ class TrackInfo:
     local_worker_identity: str = ""
 
 
-def authorize_track(t: TrackInfo, *, mode: Mode, owner: str, bound_phone_identity: str | None, already_transcribing: str | None) -> tuple[bool, str]:
+def authorize_track(t: TrackInfo, *, mode: Mode, owner: str, bound_phone_identity: str | None) -> tuple[bool, str]:
     if t.track_kind != "audio":
         return False, "not_audio"
     if t.source != "microphone":
         return False, "not_microphone"
     if t.participant_kind == "agent" or (t.local_worker_identity and t.identity == t.local_worker_identity):
         return False, "agent_output"  # never transcribe synthesized speech
-    if already_transcribing and already_transcribing != t.identity:
-        return False, "single_stream"
     if t.participant_kind == "sip":
         if bound_phone_identity and t.identity == bound_phone_identity:
             return True, "phone_bound"

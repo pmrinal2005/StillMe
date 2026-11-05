@@ -37,9 +37,12 @@ from .echo import EchoGate
 from .gate import SpeechGate
 from .log import log_event
 from .phone import BIND_ATTR, DtmfCollector, verify_binding, worker_auth_header
+from .recovery import HEALTHY_AFTER_S, Backoff
+from .sources import SourceSelector, priority_for
 from .tracks import TrackInfo, accept_control_from, authorize_track
 from .turns import TurnAdapter
 from .usage import AgentMeter, SttMeter, TtsLedger, agent_report, stt_report
+from .wake import VOICE_RMS, PreRoll, WakeDetector, frame_rms
 from .watchdog import Watchdog
 
 logger = logging.getLogger("revoice.worker")
@@ -47,6 +50,12 @@ logger = logging.getLogger("revoice.worker")
 TOPIC_TRANSCRIPT = "revoice.transcript"
 TOPIC_CONTROL = "revoice.control"
 TOPIC_STATUS = "revoice.status"
+
+# C #20: every one of these refers to ONE utterance and MUST carry its playbackAttemptId, so a late status of an old
+# attempt can never be applied to the current one. (`ready` / `listening` / `paused` / `reconnecting` / `ended` are
+# session-level and never carry one; `error` is a speech error only — STT trouble uses `reconnecting` / `paused`.)
+SPEECH_STATUSES = frozenset({"speaking", "done", "cancelled", "uncertain", "rejected", "error"})
+CONTROL_QUEUE_MAX = 64
 
 STT_SAMPLE_RATE = 16_000
 TTS_SAMPLE_RATE = 24_000
@@ -156,13 +165,24 @@ class OwnerRoom:
     stt: Any = None
     tts: Any = None
     source: Any = None
-    transcribing: str | None = None
     bound_phone: str | None = None
     listening: bool = True
     speak_task: asyncio.Task | None = None
     stt_task: asyncio.Task | None = None
-    audio_task: asyncio.Task | None = None
     stt_stream: Any = None
+    # C #22/#23: which authorized track is transcribed is decided by the selector; each candidate track has a pump.
+    selector: SourceSelector = field(default_factory=SourceSelector)
+    pumps: dict[str, asyncio.Task] = field(default_factory=dict)
+    sel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # C #24: wake-on-voice after an IDLE pause (energy detector + short in-memory pre-roll).
+    wake: WakeDetector = field(default_factory=WakeDetector)
+    preroll: PreRoll = field(default_factory=PreRoll)
+    # C #25: bounded STT recovery.
+    backoff: Backoff = field(default_factory=Backoff)
+    recovering: bool = False
+    # C #21: owner controls are processed strictly in arrival order by ONE consumer (Stop is handled synchronously).
+    ctl_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=CONTROL_QUEUE_MAX))
+    ctl_task: asyncio.Task | None = None
     echo: EchoGate = field(default_factory=EchoGate)
     voice: str = ""
     language: str = ""
@@ -200,6 +220,8 @@ class OwnerRoom:
             pass
 
     async def status(self, type_: str, attempt: str | None = None, reason: str | None = None) -> None:
+        if type_ in SPEECH_STATUSES and not attempt:
+            log_event(evt="status_without_attempt", kind=type_)  # should never happen; surfaced in logs, not hidden
         m: dict[str, Any] = {"type": type_}
         if attempt:
             m["playbackAttemptId"] = attempt
@@ -245,9 +267,13 @@ class OwnerRoom:
         await self.ctx.room.local_participant.publish_track(track, opts)
 
         room = self.ctx.room
+        self.ctl_task = asyncio.create_task(self._control_loop())
         room.on("track_published", lambda pub, p: self._consider(pub, p))
         room.on("track_subscribed", lambda track, pub, p: self._on_subscribed(track, pub, p))
         room.on("track_unsubscribed", lambda track, pub, p: self._on_unsubscribed(p))
+        room.on("track_unpublished", lambda pub, p: self._on_unpublished(pub, p))
+        room.on("track_muted", lambda p, pub: self._on_mute(p, True))
+        room.on("track_unmuted", lambda p, pub: self._on_mute(p, False))
         room.on("data_received", self._on_data)
         room.on("participant_connected", self._on_joined)
         room.on("participant_disconnected", self._on_left)

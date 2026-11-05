@@ -113,6 +113,13 @@ class Expectation:
     generation: int
 
 
+def signature_ok(secret: str, approval: Approval) -> bool:
+    """Signature only (no replay consumption). Lets the gate trust an approval's ids before acting on them."""
+    a = approval.model_dump()
+    sig = a.pop("sig")
+    return hmac.compare_digest(sign(secret, a), sig)
+
+
 async def verify(*, secret: str, approval: Approval, text: str, expect: Expectation, replay: ReplayStore, now_ms: int | None = None) -> Approval:
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     a = approval.model_dump()

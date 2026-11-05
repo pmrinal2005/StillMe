@@ -10,6 +10,7 @@ from typing import Literal
 from .config import IDLE_NO_AUDIO_S, OWNER_GONE_GRACE_S, SESSION_MAX_MINUTES
 
 EndReason = Literal["timeout", "room_exit", "idle", "budget", "user", "phone_cap"]
+PauseReason = Literal["user", "idle", "error"]
 
 
 @dataclass
@@ -19,6 +20,10 @@ class Watchdog:
     owner_gone_since: float | None = None
     last_partner_audio: float | None = None
     listening: bool = True
+    # C #24: the idle timer only runs while an authorized source is being transcribed (a billed stream is open).
+    source_active: bool = False
+    # Why listening is off: only an `idle` pause may auto-resume on voice; `user` and `error` need an explicit Resume.
+    pause_reason: PauseReason | None = None
     budget_exhausted: bool = False
     ended: EndReason | None = None
     phone_call_started: float | None = None
@@ -38,10 +43,18 @@ class Watchdog:
     def partner_audio(self, now: float) -> None:
         self.last_partner_audio = now
 
-    def set_listening(self, enabled: bool, now: float) -> None:
+    def set_listening(self, enabled: bool, now: float, reason: PauseReason = "user") -> None:
         self.listening = enabled
+        self.pause_reason = None if enabled else reason
         if enabled:
             self.last_partner_audio = now  # idle timer restarts after an explicit resume
+
+    def set_source_active(self, active: bool, now: float) -> None:
+        """A transcribed source appeared/disappeared. The idle clock starts when one appears (never counts the time
+        before a partner even joined — that used to flip listening off and leave the worker deaf on arrival)."""
+        if active and not self.source_active:
+            self.last_partner_audio = now
+        self.source_active = active
 
     def phone_bound(self, now: float, max_minutes: float) -> None:
         self.phone_call_started = now
@@ -66,6 +79,6 @@ class Watchdog:
             return "room_exit"
         if self.phone_call_started is not None and self.phone_call_max_s is not None and now - self.phone_call_started >= self.phone_call_max_s:
             return "phone_cap"
-        if self.listening and self.last_partner_audio is not None and now - self.last_partner_audio >= IDLE_NO_AUDIO_S:
+        if self.listening and self.source_active and self.last_partner_audio is not None and now - self.last_partner_audio >= IDLE_NO_AUDIO_S:
             return "idle_pause"
         return None

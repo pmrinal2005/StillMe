@@ -68,6 +68,14 @@ class TurnAdapter:
             self.text = ""
             self.closed = False
 
+    def flush(self) -> TurnMessage | None:
+        """Close the OPEN turn with the text heard so far (the speaker/source changed under it). None if nothing is open."""
+        if self.closed or not self.text:
+            return None
+        self.revision += 1
+        self.closed = True
+        return TurnMessage(self.generation, self.turn_id, self.revision, self.text, True)
+
     def on_event(self, kind: EventKind, text: str = "") -> TurnMessage | None:
         """Feed one STT event; returns a message to publish, or None if nothing changed."""
         text = (text or "").strip()
