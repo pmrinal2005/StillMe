@@ -67,9 +67,9 @@ export const api = {
     call<{ ok: true; minutesUsed?: number }>('/api/livekit/end', { method: 'POST', body: JSON.stringify({ room, reason, ticket: ticket ?? undefined }) }),
   join: (invite: string, label: string) => call<{ url: string; token: string; identity: string; room: string }>('/api/livekit/join', { method: 'POST', body: JSON.stringify({ invite, label, consent: true }) }),
   sttToken: (b: { sampleRate: number; languageCodes: string[]; keyterms: string[]; minutes: number }) =>
-    call<{ wsUrl: string; maxSessionSeconds: number }>('/api/stt-token', { method: 'POST', body: JSON.stringify(b) }),
-  renewConsent: (voiceId: string, affirmation: string) =>
-    call<{ ok: true; providerExpiresAt: number | null }>('/api/voices/renew', { method: 'POST', body: JSON.stringify({ voiceId, affirmation, speakerIsOwner: true }) }),
+    call<{ wsUrl: string; maxSessionSeconds: number; session?: string; ticket?: string }>('/api/stt-token', { method: 'POST', body: JSON.stringify(b) }),
+  renewConsent: (voiceId: string, affirmation: string, outputLanguage?: string) =>
+    call<{ ok: true; providerExpiresAt: number | null }>('/api/voices/renew', { method: 'POST', body: JSON.stringify({ voiceId, affirmation, speakerIsOwner: true, outputLanguage }) }),
   phonePair: () => call<{ code: string; expiresAt: number; number: string | null; maxCallMinutes: number; monthUsed: number; monthCap: number }>('/api/phone/pair', { method: 'POST', body: '{}', headers: ticketHeader() }),
   phoneRevoke: () => call<{ ok: true }>('/api/phone/pair', { method: 'DELETE' }),
   reconcileGet: () => call<{ estimate: { source: string; assemblyaiUsd: number; phone: { month: string; minutesUsed: number; cap: number } }; recorded: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string; at: number }[]; assemblyai: { status: string; driftUsd: number | null } | null }>('/api/reconcile'),

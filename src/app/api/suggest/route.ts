@@ -2,7 +2,8 @@ import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { guestPoolLedger, ledgerFor, projectLedger, recordCandidates, recordTurn } from '@/lib/server/state'
 import { generateCandidates, GroqError, buildMessages } from '@/lib/server/groq'
 import { CandidateSet, SuggestRequest } from '@/lib/contracts'
-import { estimateTokens } from '@/lib/budget'
+import { estimateTokens, LIMITS } from '@/lib/budget'
+import { reserveGroqDurable, settleDurableId } from '@/lib/server/spend'
 import { randomId, sha256Hex } from '@/lib/hash'
 import { withJsonErrors } from '@/lib/server/route'
 
@@ -39,12 +40,27 @@ async function handlePOST(req: Request) {
     return json({ error: 'budget', reason: 'guest_pool', retryAfterMs: gpool.retryAfterMs, message: 'Guest suggestion allowance is used up. Sign in for more.' }, 429)
   }
   const gpoolId = gpool?.ok ? gpool.id : undefined
+  const releaseMemory = () => {
+    ledgerFor(id.userId).releaseGroq(u.id)
+    projectLedger().releaseGroq(p.id)
+    if (gpoolId) guestPoolLedger().releaseGroq(gpoolId)
+  }
+
+  // A5/A6: DURABLE Groq reservation (daily requests + tokens per subject ∩ guest pool ∩ project). The in-memory
+  // ledgers above are per instance only, so on serverless every cold instance used to grant a fresh daily quota.
+  // Reserved at the worst case (input + max output), settled with the provider-reported total.
+  const g = await reserveGroqDurable(id, req, inputTokens + LIMITS.groq.maxOutputTokens)
+  if (!g.ok) {
+    releaseMemory()
+    return json(g.body, g.status)
+  }
 
   try {
     const out = await generateCandidates(body, req.signal)
     ledgerFor(id.userId).commitGroq(u.id, out.totalTokens)
     projectLedger().commitGroq(p.id, out.totalTokens)
     if (gpoolId) guestPoolLedger().commitGroq(gpoolId, out.totalTokens)
+    await settleDurableId(g.durableId, 'groq', true, out.totalTokens)
     const now = Date.now()
     const set: CandidateSet = {
       id: randomId(12),
@@ -67,9 +83,11 @@ async function handlePOST(req: Request) {
     console.log(JSON.stringify({ evt: 'suggest', tokens: out.totalTokens, status: valid.status }))
     return json({ set: valid })
   } catch (e) {
-    ledgerFor(id.userId).releaseGroq(u.id)
-    projectLedger().releaseGroq(p.id)
-    if (gpoolId) guestPoolLedger().releaseGroq(gpoolId)
+    releaseMemory()
+    // A rejected/failed request still counts as a request at Groq when it reached them (429/5xx); commit 0 tokens
+    // but keep the request counted. Network/abort before Groq answered → release entirely.
+    if (e instanceof GroqError) await settleDurableId(g.durableId, 'groq', true, 0)
+    else await settleDurableId(g.durableId, 'groq', false)
     if (e instanceof GroqError) {
       if (e.status === 429 && e.retryAfter) {
         ledgerFor(id.userId).noteRetryAfter(e.retryAfter)

@@ -1,14 +1,14 @@
 import { z } from 'zod'
 import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { activeSession, ledgerFor, projectLedger, rv, settleLocalStt } from '@/lib/server/state'
+import { activeSession, rv, settleLocalStt } from '@/lib/server/state'
 import { createRoomAndDispatch, deleteRoom, listOwnerRooms, newRoomName, ownerToken, signInvite } from '@/lib/server/livekit'
-import { reserveDurable, settleDurable } from '@/lib/server/durable'
+import { agentMinutesThisMonth, reserveSttSpend, settleByRef, settleDurableId } from '@/lib/server/spend'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
 import { logEvent } from '@/lib/server/log'
 import { InputLanguage, OutputLanguage } from '@/lib/contracts'
 import { randomId } from '@/lib/hash'
-import { dayKey, LIMITS } from '@/lib/budget'
+import { LIMITS } from '@/lib/budget'
 import { signSessionTicket, usedSttMinutes } from '@/lib/session-ticket'
 import { withJsonErrors } from '@/lib/server/route'
 
@@ -34,7 +34,8 @@ async function closeExisting(userId: string, room: string, ticket: string | null
   await deleteRoom(room)
   const used = s ? usedSttMinutes(s) : 0
   settleLocalStt(userId, room, used)
-  if (s?.sttReservationId) await settleDurable(s.sttReservationId, true, used)
+  if (s?.sttReservationId) await settleDurableId(s.sttReservationId, 'assemblyai_stt', true, used)
+  else await settleByRef(room, 'assemblyai_stt', true, used, false) // A3: no id (legacy ticket / LiveKit-only) → by ref
   logEvent({ evt: 'session_end', room, reason: 'replaced', minutes: used })
 }
 
@@ -65,30 +66,23 @@ async function handlePOST(req: Request) {
     return json({ error: 'livekit_unreachable', message: 'Could not reach LiveKit. Typing and phrases still work.' }, 502)
   }
 
-  // ---- reserve listening minutes (user ∩ project ∩ durable). Every failure path below RELEASES them (B3).
-  const now = Date.now()
-  const sttDay = dayKey(now)
-  const u = ledgerFor(id.userId).reserveSttMinutes(b.minutes, now)
-  if (!u.ok) return json({ error: 'budget', reason: u.reason }, 429)
-  const p = projectLedger().reserveSttMinutes(u.minutes, now)
-  if (!p.ok) {
-    ledgerFor(id.userId).releaseSttMinutes(u.minutes, 0, sttDay) // B3: previously leaked
-    return json({ error: 'budget', reason: p.reason }, 429)
+  // ---- A10: monthly LiveKit agent-minute cap (worker-reported, durable). Refuse BEFORE reserving anything.
+  const agentUsed = await agentMinutesThisMonth()
+  if (agentUsed !== null && agentUsed + b.minutes > LIMITS.livekit.plannedAgentMinutes) {
+    logEvent({ evt: 'session_start', status: 'denied', reason: 'agent_month_cap', used: agentUsed })
+    return json({ error: 'budget', reason: 'agent_month_cap', message: 'This month\'s voice-worker minutes are used up. Typing, phrases and speech still work.' }, 429)
   }
-  const minutes = p.minutes
-  if (minutes < u.minutes) ledgerFor(id.userId).releaseSttMinutes(u.minutes - minutes, 0, sttDay) // trim to the intersecting grant
-  const releaseLocal = () => {
-    ledgerFor(id.userId).releaseSttMinutes(minutes, 0, sttDay)
-    projectLedger().releaseSttMinutes(minutes, 0, sttDay)
-  }
-  const d = await reserveDurable(id.userId, 'assemblyai_stt', minutes)
-  if (d && !d.ok) {
-    releaseLocal() // B3: previously leaked
-    return json({ error: 'budget', reason: d.reason }, 429)
-  }
-  const sttReservationId = d?.ok ? d.id : null
 
+  // ---- reserve listening minutes (user ∩ project ∩ durable, ref = room so ANY instance and the worker can
+  // settle it — A3). Every failure path below RELEASES every layer (B3/A7).
+  const now = Date.now()
   const room = newRoomName()
+  const spend = await reserveSttSpend(id, req, b.minutes, room, now)
+  if (!spend.ok) return json(spend.body, spend.status)
+  const minutes = spend.minutes
+  const sttDay = spend.day
+  const sttReservationId = spend.durableId
+
   const conversationId = randomId(10)
   let roomCreated = false
   try {
@@ -129,8 +123,7 @@ async function handlePOST(req: Request) {
     // B3/B7: never leak the room or the reservation; return a JSON error instead of an empty 500.
     if (roomCreated) await deleteRoom(room)
     rv().sessions.delete(id.userId)
-    releaseLocal()
-    if (sttReservationId) await settleDurable(sttReservationId, false)
+    await spend.releaseAll()
     logEvent({ evt: 'session_start', status: 'error', room, reason: 'setup_failed', detail: (e as Error).message?.slice(0, 120) })
     return json({ error: 'session_start_failed', message: 'Could not start the listening room. No listening minutes were used.' }, 502)
   }

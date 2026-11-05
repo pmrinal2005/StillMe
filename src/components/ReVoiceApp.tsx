@@ -55,6 +55,11 @@ interface Session {
   mode: Mode
   startedAt: number
   maxMinutes: number
+  /** A4: the session's OWN signed ticket, captured at start — settlement never depends on the global ticket
+   *  (which cleanupSession clears, and which a replacement session overwrites). */
+  ticket?: string
+  /** A7: browser-direct STT pseudo-session id (sd-…) used to settle its durable reservation. */
+  sttSession?: string
 }
 interface ComposerSource { candidateSetId: string; candidateId: string; turn: TurnRef; original: string; intent: string }
 interface HistoryItem { speaker: 'partner' | 'user'; text: string }
@@ -106,6 +111,9 @@ export function ReVoiceApp() {
   const statusRef = useRef(status)
   statusRef.current = status
   const sessionRef = useRef<Session | null>(null)
+  /** A4: the session we are already ending (its own close() events must not trigger a second end). */
+  const endedRef = useRef<Session | null>(null)
+  const endSessionRef = useRef<((reason: 'user' | 'timeout' | 'budget' | 'idle' | 'error') => Promise<void>) | null>(null)
   const listenerRef = useRef<LiveKitListener | DirectSttListener | null>(null)
   const trackerRef = useRef(new TurnTracker(`local-${randomId(6)}`))
   const setRef = useRef<{ set: CandidateSet; draftedFrom: string; used: boolean } | null>(null)
@@ -518,23 +526,30 @@ export function ReVoiceApp() {
     const s = sessionRef.current
     const l = listenerRef.current
     if (!s && !l) return
+    // A4: capture THIS session's ticket before anything can clear or overwrite it.
+    const ticket = s?.ticket ?? getSessionTicket()
+    endedRef.current = s ?? null // closed events fired by our own close() must not re-enter
     speech?.onRoomLost()
     await l?.close().catch(() => undefined)
-    if (s?.kind === 'livekit' && s.room) await api.endSession(s.room, reason).catch(() => undefined)
+    if (s?.kind === 'livekit' && s.room) await api.endSession(s.room, reason, ticket).catch(() => undefined)
+    else if (s?.kind === 'direct' && s.sttSession) await api.endSession(s.sttSession, reason, s.ticket ?? null).catch(() => undefined) // A7
     cleanupSession()
     setListening('off')
     if (reason !== 'user') setNotice(`Listening ended (${reason}). Typing and phrases still work.`)
     void refreshStatus()
   }, [cleanupSession, refreshStatus, speech])
 
+  endSessionRef.current = endSession
+
   const listenerEvents = useMemo(() => ({
     onTurn: (t: TurnUpdate) => void onTurn(t),
     onSpeechStarted: () => { marks.current.speechStarted = performance.now() },
     onStatus: (s: { state: string; detail?: string }) => {
       setListening(s.state)
-      if (s.state === 'closed' && sessionRef.current) {
-        speech?.onRoomLost()
-        cleanupSession()
+      // A4: an unexpected close (network drop, server-side room deletion, STT Termination) must still SETTLE the
+      // reservation — previously the client only cleaned up locally and the reservation stayed open until swept.
+      if (s.state === 'closed' && sessionRef.current && endedRef.current !== sessionRef.current) {
+        void endSessionRef.current?.('error')
       }
       if (s.state === 'error') setNotice(`Listening error${s.detail ? ` (${s.detail})` : ''}. Typing and phrases still work.`)
     },
@@ -574,12 +589,13 @@ export function ReVoiceApp() {
       if (st?.providers.livekit) {
         const r = await api.startSession({ mode, voiceId: voice.id, outputLanguage: prefs.outputLanguage, inputLanguages, keyterms: prefs.keyterms, contextPrompt: prefs.contextPrompt, replace: true })
         setSessionTicket(r.ticket) // B4: signed ticket authorizes approve/end on ANY serverless instance
+        endedRef.current = null
         trackerRef.current = new TurnTracker(r.conversationId, 0)
         callsPerTurn.current.clear()
         // B6: the listener applies the per-mode audio routing policy (partner-link: voice only on the partner's phone).
         const l = new LiveKitListener(listenerEvents, { url: r.url, token: r.token, publishMic: mode === 'tabletop', mode })
         listenerRef.current = l
-        const s: Session = { kind: 'livekit', room: r.room, conversationId: r.conversationId, generation: 0, invite: r.invite, mode, startedAt: Date.now(), maxMinutes: r.maxSessionMinutes }
+        const s: Session = { kind: 'livekit', room: r.room, conversationId: r.conversationId, generation: 0, invite: r.invite, mode, startedAt: Date.now(), maxMinutes: r.maxSessionMinutes, ticket: r.ticket }
         sessionRef.current = s
         setSession(s)
         // B5: room mode is NOT enabled on connect. Speech stays on direct HTTP TTS until the worker is
@@ -621,18 +637,23 @@ export function ReVoiceApp() {
         trackerRef.current = new TurnTracker(conv, 0)
         callsPerTurn.current.clear()
         let maxMin = 20
+        endedRef.current = null
+        const s: Session = { kind: 'direct', conversationId: conv, generation: 0, invite: null, mode: 'tabletop', startedAt: Date.now(), maxMinutes: maxMin }
         const l = new DirectSttListener(listenerEvents, async () => {
           const r = await api.sttToken({ sampleRate: 16000, languageCodes: inputLanguages, keyterms: prefs.keyterms, minutes: 20 })
           maxMin = Math.floor(r.maxSessionSeconds / 60)
+          // A7: keep the pseudo-session + ticket so ending (or an unexpected close) settles the durable reservation.
+          s.sttSession = r.session
+          s.ticket = r.ticket
           return r
         })
         listenerRef.current = l
-        const s: Session = { kind: 'direct', conversationId: conv, generation: 0, invite: null, mode: 'tabletop', startedAt: Date.now(), maxMinutes: maxMin }
         sessionRef.current = s
         setSession(s)
         await l.start()
         speech?.setRoom(null)
-        setSession({ ...s, maxMinutes: maxMin })
+        s.maxMinutes = maxMin
+        setSession({ ...s })
         watchdog.current = setTimeout(() => void endSession('timeout'), maxMin * 60_000)
       } else {
         setNotice('Listening is not configured on this server. Typing, phrases and speech still work.')
@@ -640,8 +661,11 @@ export function ReVoiceApp() {
     } catch (e) {
       const code = e instanceof ApiError ? e.code : (e as Error).message
       setNotice(`Could not start listening (${code.replace(/_/g, ' ')}). Typing and phrases still work.`)
+      const failed = sessionRef.current
+      endedRef.current = failed
       await listenerRef.current?.close().catch(() => undefined)
-      if (sessionRef.current?.room) await api.endSession(sessionRef.current.room, 'error').catch(() => undefined)
+      if (failed?.room) await api.endSession(failed.room, 'error', failed.ticket ?? getSessionTicket()).catch(() => undefined)
+      else if (failed?.sttSession) await api.endSession(failed.sttSession, 'error', failed.ticket ?? null).catch(() => undefined) // A7
       cleanupSession()
       setListening('off')
     }
@@ -667,7 +691,8 @@ export function ReVoiceApp() {
     }, 30_000)
     const onUnload = () => {
       const s = sessionRef.current
-      if (s?.kind === 'livekit' && s.room) navigator.sendBeacon?.('/api/livekit/end', new Blob([JSON.stringify({ room: s.room, reason: 'idle', ticket: getSessionTicket() ?? undefined })], { type: 'application/json' }))
+      const room = s?.kind === 'livekit' ? s.room : s?.sttSession // A7: direct sessions are settled too
+      if (s && room) navigator.sendBeacon?.('/api/livekit/end', new Blob([JSON.stringify({ room, reason: 'idle', ticket: s.ticket ?? getSessionTicket() ?? undefined })], { type: 'application/json' }))
     }
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('pagehide', onUnload)

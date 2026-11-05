@@ -244,7 +244,7 @@ function RenewForm({ voice, onDone }: { voice: ClonedVoiceProfile; onDone: (msg:
     setBusy(true)
     setErr(null)
     try {
-      const r = await api.renewConsent(voice.voiceId, typed)
+      const r = await api.renewConsent(voice.voiceId, typed, voice.recordingLanguage) // A9: explicit language
       const now = Date.now()
       await db.voices.update(voice.id, { consentAt: now, providerExpiresAt: r.providerExpiresAt ?? undefined, speakerConsent: true })
       await db.consentLog.add({ id: uid(), voiceRecordId: voice.id, action: 'renewal', at: now })

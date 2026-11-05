@@ -39,6 +39,7 @@ from .log import log_event
 from .phone import BIND_ATTR, DtmfCollector, verify_binding, worker_auth_header
 from .tracks import TrackInfo, accept_control_from, authorize_track
 from .turns import TurnAdapter
+from .usage import AgentMeter, SttMeter, TtsLedger, agent_report, stt_report
 from .watchdog import Watchdog
 
 logger = logging.getLogger("revoice.worker")
@@ -156,6 +157,28 @@ class OwnerRoom:
     voice: str = ""
     language: str = ""
     closing: bool = False
+    # A1/A10 metering (content-free)
+    stt_meter: SttMeter = field(default_factory=SttMeter)
+    agent_meter: AgentMeter = field(default_factory=lambda: AgentMeter(started_at=time.monotonic()))
+    tts_ledger: TtsLedger = field(default_factory=TtsLedger)
+
+    # ---------------- usage reports (A1 / A10)
+    async def _report(self, payload: dict | None) -> None:
+        if payload:
+            await _post_app(self.env, "/api/worker/usage", payload)
+
+    def _report_tts(self, approval_id: str, chars: int) -> None:
+        """A1: settle the approval-time reservation (ref tts:<approvalId>) with what was actually synthesized."""
+        payload = self.tts_ledger.report(approval_id, chars)
+        if payload:
+            asyncio.create_task(self._report(payload))
+
+    async def _report_session(self, final: bool) -> None:
+        """A10: connected STT minutes (authoritative when final) + LiveKit agent minutes for this room."""
+        now = time.monotonic()
+        room = self.ctx.room.name
+        await self._report(stt_report(room, self.stt_meter, now, final))
+        await self._report(agent_report(room, self.meta.ownerIdentity, self.agent_meter, now))
 
     # ---------------- publishing
     async def send(self, topic: str, msg: dict) -> None:
@@ -277,6 +300,7 @@ class OwnerRoom:
         if self.stt_stream is not None or self.closing:
             return
         self.stt_stream = self.stt.stream()
+        self.stt_meter.opened(time.monotonic())  # A10: billing starts when the socket connects
         self.adapter.closed = True  # new stream -> new turn ids continue monotonically
         self.stt_task = asyncio.create_task(self._consume_stt(self.stt_stream))
         log_event(evt="stt_open")
@@ -285,6 +309,7 @@ class OwnerRoom:
         s, self.stt_stream = self.stt_stream, None
         if s is None:
             return
+        self.stt_meter.closed(time.monotonic())  # A10
         try:
             s.end_input()
             await asyncio.wait_for(s.aclose(), timeout=3)
@@ -339,6 +364,7 @@ class OwnerRoom:
             log_event(evt="stt_error", code=type(e).__name__)
             await self.status("error", reason="stt_unavailable")
             self.stt_stream = None
+            self.stt_meter.closed(time.monotonic())  # A10: a dead socket is no longer billed
 
     # ---------------- control (owner only)
     def _on_data(self, packet: Any) -> None:
@@ -391,6 +417,10 @@ class OwnerRoom:
             attempt = await self.gate.admit(ctl.approval, ctl.text)
         except ApprovalRejected as e:
             log_event(evt="approval_rejected", reason=e.reason)
+            # A1: nothing was synthesized → release the approval-time reservation. Not for forged/malformed
+            # approvals (their id is untrusted); the durable sweep still settles those rows.
+            if e.reason not in ("bad_signature", "malformed"):
+                self._report_tts(ctl.approval.approvalId, 0)
             await self.status("rejected", attempt=ctl.approval.playbackAttemptId, reason=e.reason)
             if e.reason == "session_char_cap":
                 await self.status("paused", reason="budget")
@@ -399,6 +429,8 @@ class OwnerRoom:
 
     async def _synthesize(self, attempt: Any) -> None:
         t0 = time.monotonic()
+        sent = False  # A1: once the exact text is sent to the provider it is billed (conservative)
+        failed_before_audio = False
         try:
             # Voice/language are fixed per TTS session: changing them retires pooled sockets
             # (a newly configured session), never a mid-session switch.
@@ -408,6 +440,7 @@ class OwnerRoom:
             self.echo.start_speaking()
             await self.status("speaking", attempt=attempt.attempt_id)
             first = True
+            sent = True
             async with self.tts.synthesize(attempt.text) as stream:  # exact approved text only
                 async for ev in stream:
                     if not self.gate.accept_frame(attempt.attempt_id):
@@ -426,10 +459,14 @@ class OwnerRoom:
         except Exception as e:  # noqa: BLE001
             self.echo.stop_speaking(time.monotonic())
             outcome = self.gate.failed(attempt.attempt_id)
+            failed_before_audio = outcome == "error"  # provider errors before first audio are not billed
             log_event(evt="tts_failed", attempt=attempt.attempt_id, code=type(e).__name__, status=outcome)
             if outcome:
                 # 'uncertain' = some audio may have been heard. NEVER replayed automatically.
                 await self.status(outcome, attempt=attempt.attempt_id, reason="synthesis_failed")
+        finally:
+            # A1: exactly one usage report per approval — done, cancelled or failed.
+            self._report_tts(attempt.approval_id, attempt.chars if sent and not failed_before_audio else 0)
 
     async def _stop(self, attempt_id: str | None) -> None:
         cur = self.gate.stop(attempt_id)
@@ -501,6 +538,8 @@ class OwnerRoom:
     async def run_watchdog(self) -> None:
         while not self.closing:
             await asyncio.sleep(5)
+            if self.stt_meter.heartbeat_due(time.monotonic()):
+                asyncio.create_task(self._report_session(final=False))  # A10 heartbeat (sweep fallback)
             r = self.watchdog.check(time.monotonic())
             if r is None:
                 continue
@@ -522,6 +561,11 @@ class OwnerRoom:
         await self._stop(None)
         await self._close_stt(reason)
         await self._hang_up_phone()
+        # A10: authoritative final usage — connected STT minutes settle the room's reservation on any instance.
+        try:
+            await asyncio.wait_for(self._report_session(final=True), timeout=10)
+        except Exception:  # noqa: BLE001 — the sweep commits the last heartbeat (+1 min) if this never lands
+            pass
         await self.status("ended", reason=reason)
         log_event(evt="session_end", reason=reason)
         try:

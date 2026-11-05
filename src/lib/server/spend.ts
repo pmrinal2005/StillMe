@@ -104,16 +104,65 @@ export function estUsd(provider: SpendProvider, units: number): number {
   return 0
 }
 
-export type DurableResult = { ok: true; id: string } | { ok: false; reason: string; unavailable?: boolean } | null
+export type DurableResult = { ok: true; id: string; legacy?: boolean } | { ok: false; reason: string; unavailable?: boolean } | null
 
-function isMissingFunction(err: { code?: string; message?: string } | null | undefined) {
-  return !!err && (err.code === 'PGRST202' || err.code === '42883' || /reserve_budget_v3|settle_by_ref|could not find the function/i.test(err.message ?? ''))
+export function isMissingFunction(err: { code?: string; message?: string } | null | undefined) {
+  return (
+    !!err &&
+    (err.code === 'PGRST202' || err.code === '42883' || err.code === '42703' || err.code === 'PGRST204' ||
+      /reserve_budget_v3|settle_by_ref|progress_by_ref|record_agent_minutes|month_units|could not find the function|schema cache|column .* does not exist/i.test(err.message ?? ''))
+  )
 }
 
-/** Durable reservation (migration 0003). null = no durable store configured (memory ledgers apply). */
+/**
+ * Durable store schema mode, cached per instance.
+ *  'v3'      migration 0003 applied (subjects, guest pool, refs, request counts, sweep, agent minutes)
+ *  'legacy'  only 0001/0002 applied → reserve_budget/settle_budget (project-wide + per-user caps)
+ *
+ * REGRESSION FIX: the deployed site has no 0003 yet; failing closed on the missing RPC turned every
+ * spend into a 503 (`budget_store_migration_required`). We now fall back to the legacy RPCs, which are
+ * still durable and cross-instance for the project/lifetime caps. Re-probed every 60 s so applying
+ * 0003 is picked up without a redeploy. A genuinely unreachable store still fails closed.
+ */
+const MODE_TTL_MS = 60_000
+const modeCache = globalThis as unknown as { __rvSpendMode?: { mode: 'v3' | 'legacy'; at: number } }
+export function knownStoreMode(now = Date.now()): 'v3' | 'legacy' | null {
+  const m = modeCache.__rvSpendMode
+  return m && now - m.at < MODE_TTL_MS ? m.mode : null
+}
+export function setStoreMode(mode: 'v3' | 'legacy' | null) {
+  modeCache.__rvSpendMode = mode ? { mode, at: Date.now() } : undefined
+}
+
+/** Legacy (0001) reservation. Subjects/pools/refs/request counts are not durable here — the in-memory
+ *  ledgers (always checked first) still enforce them per instance; the durable layer enforces the
+ *  per-user (uuid only), project-daily and protected-reserve caps. */
+async function reserveLegacy(s: DurableSubject, provider: SpendProvider, units: number): Promise<DurableResult> {
+  const sb = adminClient()
+  if (!sb) return null
+  const c = durableCaps(provider, s.pool === 'guest')
+  const big = 1e12
+  const { data, error } = await sb.rpc('reserve_budget', {
+    p_user: s.user, // null for guests/demo → only project-wide caps apply durably
+    p_provider: provider,
+    p_units: units,
+    p_est_usd: estUsd(provider, units),
+    p_user_daily_units: c.subjectUnits ?? big,
+    p_project_daily_units: c.projectUnits ?? big,
+    p_user_daily_usd: c.subjectUsd ?? big,
+    p_project_daily_usd: c.projectUsd ?? big,
+    p_lifetime_spendable_usd: LIMITS.assembly.totalCreditUsd - LIMITS.assembly.protectedReserveUsd,
+  })
+  if (error) return { ok: false, reason: 'budget_store_unavailable', unavailable: true } // fail closed
+  const row = Array.isArray(data) ? data[0] : data
+  return row?.ok ? { ok: true, id: row.reservation_id as string, legacy: true } : { ok: false, reason: (row?.reason as string) ?? 'denied' }
+}
+
+/** Durable reservation (0003, with legacy fallback). null = no durable store configured (memory ledgers apply). */
 export async function reserveDurableV3(s: DurableSubject, provider: SpendProvider, units: number, ref: string | null): Promise<DurableResult> {
   const sb = adminClient()
   if (!sb) return null
+  if (knownStoreMode() === 'legacy') return reserveLegacy(s, provider, units)
   const c = durableCaps(provider, s.pool === 'guest')
   const { data, error } = await sb.rpc('reserve_budget_v3', {
     p_subject: s.subject,
@@ -134,7 +183,14 @@ export async function reserveDurableV3(s: DurableSubject, provider: SpendProvide
     p_project_daily_count: c.projectCount,
     p_lifetime_spendable_usd: LIMITS.assembly.totalCreditUsd - LIMITS.assembly.protectedReserveUsd,
   })
-  if (error) return { ok: false, reason: isMissingFunction(error) ? 'budget_store_migration_required' : 'budget_store_unavailable', unavailable: true } // fail closed
+  if (error) {
+    if (isMissingFunction(error)) {
+      setStoreMode('legacy')
+      return reserveLegacy(s, provider, units)
+    }
+    return { ok: false, reason: 'budget_store_unavailable', unavailable: true } // fail closed
+  }
+  setStoreMode('v3')
   const row = Array.isArray(data) ? data[0] : data
   return row?.ok ? { ok: true, id: row.reservation_id as string } : { ok: false, reason: (row?.reason as string) ?? 'denied' }
 }
@@ -207,6 +263,8 @@ export type Deny = { ok: false; status: number; body: Record<string, unknown> }
 export interface TtsHandle {
   ok: true
   durableId: string | null
+  /** The durable row was made by the legacy (pre-0003) RPC: it has no ref, so only id-settlement works. */
+  legacy: boolean
   /** Commit memory + durable with the provider-billed characters. */
   commit(billedChars?: number): Promise<void>
   /** Commit only the in-memory ledgers (full chars); the durable row stays reserved for the worker (A1). */
@@ -251,6 +309,7 @@ export async function reserveTtsSpend(id: Identity, req: Request, chars: number,
   return {
     ok: true,
     durableId,
+    legacy: !!(d?.ok && d.legacy),
     commitMemoryOnly() {
       if (done) return
       done = true
@@ -334,10 +393,17 @@ export async function reserveSttSpend(id: Identity, req: Request, requested: num
 }
 
 /** Status probe: is the durable spend store present and migrated? */
-export async function spendStoreStatus(): Promise<'memory' | 'ready' | 'migration_required' | 'unavailable'> {
+export async function spendStoreStatus(): Promise<'memory' | 'ready' | 'legacy' | 'unavailable'> {
   const sb = adminClient()
   if (!sb) return 'memory'
   const { error } = await sb.rpc('month_units', { p_provider: 'livekit_agent' })
-  if (!error) return 'ready'
-  return isMissingFunction(error) || /month_units/i.test(error.message ?? '') ? 'migration_required' : 'unavailable'
+  if (!error) {
+    setStoreMode('v3')
+    return 'ready'
+  }
+  if (isMissingFunction(error)) {
+    setStoreMode('legacy')
+    return 'legacy' // working, but apply supabase/migrations/0003_spend_control.sql for full A-series enforcement
+  }
+  return 'unavailable'
 }

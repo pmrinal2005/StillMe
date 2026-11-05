@@ -73,13 +73,31 @@ async function handlePOST(req: Request) {
       currentTurn = reason ? latest.ref : body.source.turn
     }
   }
+  let approval
   try {
-    const approval = await issueApproval({ secret: env.approvalSecret(), sub: id.userId, req: body, candidate: { currentTurn } })
-    return json({ approval })
+    approval = await issueApproval({ secret: env.approvalSecret(), sub: id.userId, req: body, candidate: { currentTurn } })
   } catch (e) {
     if (e instanceof ApprovalError) return json({ error: e.reason, message: e.message }, 409)
     throw e
   }
+
+  // A1: a ROOM approval is spoken by the worker, which used to bypass every budget layer. The money is now
+  // reserved HERE (user ∩ project ∩ guest pool ∩ durable), keyed by ref `tts:<approvalId>`. The worker reports
+  // the characters it actually synthesized to /api/worker/usage, which settles the row on any instance; a
+  // report that never arrives is committed in full by the durable sweep (never left open, never free).
+  // Direct approvals are reserved later by /api/speak, so they are not double-counted here.
+  if (body.roomName) {
+    const spend = await reserveTtsSpend(id, req, approval.chars, workerTtsRef(approval.approvalId))
+    if (!spend.ok) return json(spend.body, spend.status)
+    if (spend.durableId && spend.legacy) {
+      // Legacy store (0003 not applied): no ref column, so the worker cannot settle by ref. Commit the full
+      // approved length now — conservative (over-counts a cancelled utterance, never under-counts).
+      await spend.commit(approval.chars)
+    } else {
+      spend.commitMemoryOnly() // memory ledgers: full approved length; durable row awaits the worker's report
+    }
+  }
+  return json({ approval })
 }
 
 export const POST = withJsonErrors('approve', handlePOST)
