@@ -58,7 +58,17 @@ PHONE_PROMPT = (
 
 
 class RoomMeta(BaseModel):
+    """B16: the worker's private configuration. It arrives in the AGENT DISPATCH metadata (ctx.job.metadata), which is
+    delivered to this job only. Room metadata is readable by every participant (the partner's browser) and is SEALED by
+    the web app, so the worker never reads configuration from it.
+
+    ownerIdentity = the owner's opaque, per-room LiveKit participant identity: control messages and the tabletop
+                    track are accepted only from it. It is NOT the user id.
+    ownerSub      = the owner's user id: what approvals are signed for (`sub`). Never used as a LiveKit identity.
+    """
+
     ownerIdentity: str
+    ownerSub: str
     conversationId: str
     generation: int = 0
     mode: str = "tabletop"
@@ -178,7 +188,7 @@ class OwnerRoom:
         now = time.monotonic()
         room = self.ctx.room.name
         await self._report(stt_report(room, self.stt_meter, now, final))
-        await self._report(agent_report(room, self.meta.ownerIdentity, self.agent_meter, now))
+        await self._report(agent_report(room, self.meta.ownerSub, self.agent_meter, now))  # user id (spend attribution), not the opaque identity
 
     # ---------------- publishing
     async def send(self, topic: str, msg: dict) -> None:
@@ -654,12 +664,17 @@ async def run_call_room(ctx: Any, env: Any) -> None:
 # --------------------------------------------------------------------------- entrypoint
 
 def parse_meta(raw: str | None) -> RoomMeta | None:
+    """Parse the dispatch metadata. Anything malformed (or the legacy shape without `ownerSub`) is refused."""
     if not raw:
         return None
     try:
         return RoomMeta.model_validate_json(raw)
     except ValidationError:
         return None
+
+
+def is_owner_room_name(name: str) -> bool:
+    return name.startswith("rv-")
 
 
 async def entrypoint(ctx: Any) -> None:
@@ -671,17 +686,21 @@ async def entrypoint(ctx: Any) -> None:
         raise RuntimeError("ASSEMBLYAI_API_KEY is required, plus REVOICE_APPROVAL_SECRET or LIVEKIT_API_SECRET (approval secret is derived from it)")
     # Subscribe to nothing by default: each track is authorized individually.
     await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_NONE)
-    meta = parse_meta(ctx.room.metadata)
+    # B16: configuration comes from the dispatch metadata (server-issued, job-private), NEVER from room metadata.
+    meta = parse_meta(getattr(getattr(ctx, "job", None), "metadata", None))
     if meta is None:
-        # No server-set metadata => not an owner room. Only phone call rooms are allowed here.
+        # No dispatch config => not an owner room. Only phone call rooms are allowed here.
         if ctx.room.name.startswith("call-"):
             await run_call_room(ctx, env)
         else:
-            log_event(evt="room_refused", reason="no_metadata")
+            log_event(evt="room_refused", reason="no_dispatch_metadata")
+        return
+    if not is_owner_room_name(ctx.room.name):
+        log_event(evt="room_refused", reason="bad_room_name")
         return
     gate = SpeechGate(
         secret=env.approval_secret,
-        expect=Expectation(meta.ownerIdentity, meta.conversationId, ctx.room.name, meta.generation),
+        expect=Expectation(meta.ownerSub, meta.conversationId, ctx.room.name, meta.generation),  # approvals are signed for the USER id
         replay=MemoryReplayStore(),
     )
     owner = OwnerRoom(ctx=ctx, env=env, meta=meta, gate=gate, watchdog=Watchdog(started_at=time.monotonic(), max_minutes=meta.maxSessionMinutes))

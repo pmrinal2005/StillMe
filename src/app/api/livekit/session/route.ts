@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { activeSession, rv, settleLocalStt } from '@/lib/server/state'
-import { createRoomAndDispatch, deleteRoom, listOwnerRooms, newRoomName, ownerToken, signInvite } from '@/lib/server/livekit'
+import { createRoomAndDispatch, deleteRoom, listOwnerRooms, newRoomName, ownerParticipantIdentity, ownerToken, signInvite } from '@/lib/server/livekit'
+import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { agentMinutesThisMonth, reserveSttSpend, settleByRef, settleDurableId } from '@/lib/server/spend'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
 import { logEvent } from '@/lib/server/log'
@@ -51,6 +52,16 @@ async function handlePOST(req: Request) {
   const b = parsed.data
   const priorTicket = ticketFrom(req, b)
 
+  // ---- B11/B12: the voice must be authorized for THIS account before a room/worker/reservation exists.
+  // (Library voices are open; a cloned voice needs its server-side registration with complete, unexpired, unrevoked consent.)
+  try {
+    const va = await authorizeVoice(voiceStoreFor(id.userId), id, b.voiceId, env.assemblyRegion())
+    if (!va.ok) return json({ error: 'voice_not_authorized', reason: va.reason, message: 'This voice is not authorized for your account. Pick a library voice or renew consent.' }, 403)
+  } catch (e) {
+    if (e instanceof VoiceRegistryError) return json({ error: e.code, message: e.message }, e.status)
+    throw e
+  }
+
   // ---- one active conversation per user — checked against LiveKit (B4), not just this instance's memory
   try {
     const existing = new Set<string>()
@@ -86,24 +97,19 @@ async function handlePOST(req: Request) {
   const conversationId = randomId(10)
   let roomCreated = false
   try {
-    const token = await ownerToken({ identity: id.userId, room, mode: b.mode }) // mint BEFORE creating the room (B1 failed here after dispatch)
+    // B16: the owner's LiveKit identity is opaque + per room (HMAC of user id and room). The partner's browser lists
+    // participant identities, so the user id must never be one. The user id stays server-side (sealed metadata + ticket).
+    const ownerIdentity = await ownerParticipantIdentity(id.userId, room)
+    const token = await ownerToken({ identity: ownerIdentity, room, mode: b.mode }) // mint BEFORE creating the room (B1 failed here after dispatch)
     const invite = b.mode === 'tabletop' ? null : await signInvite(room, id.userId)
     roomCreated = true
-    await createRoomAndDispatch(room, {
-      ownerIdentity: id.userId,
-      conversationId,
-      generation: 0,
-      mode: b.mode,
-      voiceId: b.voiceId,
-      outputLanguage: b.outputLanguage,
-      inputLanguages: b.inputLanguages,
-      keyterms: b.keyterms,
-      contextPrompt: b.contextPrompt,
-      maxSessionMinutes: minutes,
-      startedAt: now,
-      sttMinutes: minutes,
-      sttReservationId,
-    })
+    await createRoomAndDispatch(
+      room,
+      // SEALED server bookkeeping (opaque to participants).
+      { ownerIdentity: id.userId, ownerParticipant: ownerIdentity, conversationId, generation: 0, mode: b.mode, maxSessionMinutes: minutes, startedAt: now, sttMinutes: minutes, sttReservationId },
+      // Worker-private configuration → agent DISPATCH metadata (never visible to room participants).
+      { ownerIdentity, ownerSub: id.userId, conversationId, generation: 0, mode: b.mode, voiceId: b.voiceId, outputLanguage: b.outputLanguage, inputLanguages: b.inputLanguages, keyterms: b.keyterms, contextPrompt: b.contextPrompt, maxSessionMinutes: minutes },
+    )
     rv().sessions.set(id.userId, { room, conversationId, mode: b.mode, startedAt: now, maxMinutes: minutes, generation: 0, sttMinutes: minutes, sttDay, sttReservationId })
     const ticket = await signSessionTicket(env.approvalSecret(), {
       sub: id.userId,

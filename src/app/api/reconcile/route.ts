@@ -1,11 +1,11 @@
 import { z } from 'zod'
-import { getIdentity, json, requireAccount, unauthorized, type Identity } from '@/lib/server/auth'
+import { getIdentity, isOperator, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { monthKey, phoneMonthUsed, projectLedger, rv } from '@/lib/server/state'
 import { adminClient, audit, usageSummary } from '@/lib/server/durable'
 import { LIMITS } from '@/lib/budget'
 import { TELEPHONY } from '@/lib/features'
-import { reconcile } from '@/lib/reconcile'
+import { clampReconcileSeed, reconcile } from '@/lib/reconcile'
 import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
@@ -15,10 +15,10 @@ export const dynamic = 'force-dynamic'
  *  GET  → app-estimated usage (durable store if configured, else this process) + recorded provider figures + drift.
  *  POST → operator records figures read from the AssemblyAI / Groq / LiveKit dashboards (content-free).
  */
-function isOperator(id: Identity) {
-  const ops = env.operatorIds()
-  return ops.length === 0 ? true : ops.includes(id.userId)
-}
+// B13: operator access is `isOperator()` from auth.ts — FAIL CLOSED. With REVOICE_OPERATOR_IDS and
+// REVOICE_OPERATOR_EMAILS both empty NOBODY is an operator (the old local copy returned `true` for everyone, so any
+// signed-in or anonymous account could read project spend and post provider figures). Anonymous Supabase users are
+// guests and never operators; e-mail operators need a CONFIRMED address.
 
 const Body = z.object({
   provider: z.enum(['assemblyai', 'groq', 'livekit', 'supabase', 'vercel']),
@@ -90,8 +90,12 @@ async function handlePOST(req: Request) {
   list.splice(50)
   void audit(id.userId, 'reconciliation', b.provider)
   // If the provider reports MORE than the app estimated, the ledger is seeded upward so caps stay conservative.
-  if (b.provider === 'assemblyai' && b.providerReportedUsd !== null && b.providerReportedUsd > projectLedger().lifetimeUsd) {
-    projectLedger().lifetimeUsd = b.providerReportedUsd
+  // B13: the seed is CLAMPED to [0, total credit]. An unbounded figure (the schema allows 100 000) used to push
+  // lifetimeUsd past the spendable limit and lock every user out of speech until the next cold start — one typo or one
+  // hostile operator request was a denial of service.
+  if (b.provider === 'assemblyai' && b.providerReportedUsd !== null) {
+    const seeded = clampReconcileSeed(b.providerReportedUsd)
+    if (seeded > projectLedger().lifetimeUsd) projectLedger().lifetimeUsd = seeded
   }
   return json({ ok: true, result: appUsd === null ? null : reconcile(appUsd, b.providerReportedUsd) })
 }

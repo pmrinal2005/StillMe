@@ -97,3 +97,17 @@ export async function takePhoneCall(store: RoomMetaStore, room: string): Promise
   await store.update(room, { ...meta, phoneCall: null })
   return { meta, call: meta.phoneCall }
 }
+
+/**
+ * B15: burn EVERY live pair code (all owners). Called when the bind guard trips, so a brute-forcer cannot keep a
+ * code alive while guessing. Owners simply issue a fresh code. Returns how many rooms were cleared.
+ */
+export async function burnAllPairCodes(store: RoomMetaStore): Promise<number> {
+  let n = 0
+  for (const { room, meta } of await store.list()) {
+    if (!meta.phonePair) continue
+    await store.update(room, { ...meta, phonePair: null })
+    n++
+  }
+  return n
+}

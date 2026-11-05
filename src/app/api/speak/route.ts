@@ -9,6 +9,7 @@ import { SpeakRequest } from '@/lib/contracts'
 import { ApprovalError, verifyApproval } from '@/lib/approval'
 import { codePoints } from '@/lib/hash'
 import { withJsonErrors } from '@/lib/server/route'
+import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -26,6 +27,16 @@ async function handlePOST(req: Request) {
   const parsed = SpeakRequest.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
   const { approval, text } = parsed.data
+
+  // B11/B12: re-check the voice at SPEAK time (a clone may have been revoked or expired since the approval was
+  // signed; approvals live up to 60 s). A signed approval is not a licence to use somebody else's/expired voice.
+  try {
+    const va = await authorizeVoice(voiceStoreFor(id.userId), id, approval.voiceId, env.assemblyRegion())
+    if (!va.ok) return json({ error: 'voice_not_authorized', reason: va.reason }, 403)
+  } catch (e) {
+    if (e instanceof VoiceRegistryError) return json({ error: e.code }, e.status)
+    throw e
+  }
 
   try {
     await verifyApproval({ secret: env.approvalSecret(), approval, text, expect: { sub: id.userId, roomName: null }, replay: durableReplay(id.userId, approval.textHash) })

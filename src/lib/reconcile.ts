@@ -10,6 +10,18 @@ export interface ReconcileResult {
   status: 'ok' | 'under_counted' | 'over_counted' | 'no_provider_figure'
 }
 
+import { LIMITS } from './budget'
+
+/**
+ * B13: the operator-supplied provider figure seeds the project ledger upward. It is CLAMPED to [0, total credit]:
+ * an unbounded figure (the request schema allows 100 000) used to push lifetimeUsd past the spendable limit and lock
+ * every user out of speech until the next cold start — a typo or a hostile request was a denial of service.
+ */
+export function clampReconcileSeed(usd: number): number {
+  if (!Number.isFinite(usd) || usd < 0) return 0
+  return Math.min(usd, LIMITS.assembly.totalCreditUsd)
+}
+
 export const RECONCILE_TOLERANCE = { pct: 0.1, usd: 0.25 }
 
 export function reconcile(appUsd: number, providerUsd: number | null, tol = RECONCILE_TOLERANCE): ReconcileResult {

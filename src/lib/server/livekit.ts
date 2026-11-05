@@ -53,6 +53,8 @@ export interface RoomMetadata {
    * The whole object is sealed, so participants cannot even see the hash.
    */
   phonePair?: { codeHash: string; expiresAt: number; attempts: number } | null
+  /** B17: ids of invites already consumed (fallback single-use store when the durable `consume_invite` RPC is unavailable). */
+  usedInvites?: string[]
   /** Minutes reserved for an in-progress inbound call (settled by /api/phone/usage on any instance). */
   phoneCall?: { identity: string; minutes: number; month: string; at: number } | null
   /** @deprecated B16: no longer written (moved to WorkerConfig). Kept optional so old readers/tests still type-check. */

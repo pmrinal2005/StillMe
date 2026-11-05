@@ -8,7 +8,8 @@ import { audit, reservePhoneCallDurable } from '@/lib/server/durable'
 import { TELEPHONY } from '@/lib/features'
 import { logEvent } from '@/lib/server/log'
 import { withJsonErrors } from '@/lib/server/route'
-import { consumePairCode, dropPairCode, livekitRoomStore, lookupPairCode } from '@/lib/server/phone-store'
+import { burnAllPairCodes, consumePairCode, dropPairCode, livekitRoomStore, lookupPairCode } from '@/lib/server/phone-store'
+import { bindAllowed, recordBindFailure } from '@/lib/server/phone-guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -40,7 +41,14 @@ async function handlePOST(req: Request) {
   }
   const parsed = Body.safeParse(parsedJson)
   if (!parsed.success) return json({ error: 'invalid_code' }, 400)
-  const { code, identity } = parsed.data
+  const { code, identity, callRoom } = parsed.data
+
+  // B15: refuse BEFORE looking the code up when this call / caller / the whole line is locked out.
+  const gate = await bindAllowed(callRoom, identity)
+  if (!gate.ok) {
+    logEvent({ evt: 'phone_bind', status: 'locked', scope: gate.scope })
+    return json({ error: 'phone_locked', scope: gate.scope }, 429)
+  }
 
   const key = await hashPairCode(env.approvalSecret(), code)
   const now = Date.now()
@@ -48,8 +56,12 @@ async function handlePOST(req: Request) {
   const store = await livekitRoomStore()
   const found = await lookupPairCode(store, key, now)
   if (!found.ok) {
-    logEvent({ evt: 'phone_bind', status: 'rejected', reason: 'invalid_code' })
-    return json({ error: 'invalid_code' }, 403)
+    // B15: a wrong code now COSTS the caller (it used to be free unless it happened to match a live code).
+    const tripped = await recordBindFailure(callRoom, identity)
+    let burned = 0
+    if (tripped.length) burned = await burnAllPairCodes(store).catch(() => 0)
+    logEvent({ evt: 'phone_bind', status: 'rejected', reason: 'invalid_code', tripped: tripped.join(',') || undefined, burned: burned || undefined })
+    return json({ error: tripped.length ? 'phone_locked' : 'invalid_code' }, tripped.length ? 429 : 403)
   }
   const { room, meta } = found
   if (meta.phoneCall) {

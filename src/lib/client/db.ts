@@ -115,3 +115,16 @@ export async function putCachedAudio(e: Omit<CachedAudio, 'key' | 'createdAt'>, 
 export async function purgeVoiceCache(voiceId: string) {
   await db.audioCache.where('voiceId').equals(voiceId).delete()
 }
+
+/**
+ * B11: the SERVER registry is the source of truth for cloned voices. The device copy is only a display cache:
+ * replace it with what the server returned (so a revoke/expiry/other-device change always wins, and a record that
+ * only ever existed in this browser — the old self-attested kind — disappears).
+ */
+export async function syncVoicesFromServer(voices: ClonedVoiceProfile[]) {
+  const keep = new Set(voices.map((v) => v.id))
+  await db.transaction('rw', db.voices, async () => {
+    for (const v of await db.voices.toArray()) if (!keep.has(v.id)) await db.voices.delete(v.id)
+    for (const v of voices) await db.voices.put(v)
+  })
+}

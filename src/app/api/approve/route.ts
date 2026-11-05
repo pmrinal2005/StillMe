@@ -6,26 +6,12 @@ import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
 import { ApproveRequest, type TurnRef } from '@/lib/contracts'
 import { ApprovalError, issueApproval } from '@/lib/approval'
 import { materialChange } from '@/lib/turns'
-import { clonedVoiceUsable, isLibraryVoice } from '@/lib/voices'
+import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { withJsonErrors } from '@/lib/server/route'
 import { reserveTtsSpend } from '@/lib/server/spend'
 import { workerTtsRef } from '@/lib/spend-refs'
 
 export const dynamic = 'force-dynamic'
-
-/** Cloned-voice consent attestation from the owner's device registry; the server refuses expired/revoked voices. */
-const VoiceAttestation = z
-  .object({
-    voiceId: z.string(),
-    region: z.enum(['us', 'eu']),
-    consentAt: z.number(),
-    providerExpiresAt: z.number().optional(),
-    revoked: z.boolean(),
-    speakerConsent: z.boolean(),
-    rightsConfirmed: z.boolean(),
-    biometricTermsAccepted: z.boolean(),
-  })
-  .optional()
 
 /**
  * Freeze exact text → signed single-use approval. This is the ONLY way text becomes
@@ -35,9 +21,10 @@ async function handlePOST(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
   const raw = await req.json().catch(() => null)
-  const parsed = ApproveRequest.extend({ voice: VoiceAttestation, ticket: z.string().max(2000).optional() }).safeParse(raw)
+  const parsed = ApproveRequest.extend({ ticket: z.string().max(2000).optional() }).safeParse(raw)
   if (!parsed.success) return json({ error: 'invalid_request', issues: parsed.error.issues.slice(0, 5) }, 400)
-  const { voice, ticket, ...body } = parsed.data
+  // B11: any client-supplied `voice` consent attestation is IGNORED (it was self-asserted); the server registry decides.
+  const { ticket, ...body } = parsed.data
 
   // Room approvals must target the caller's own active conversation (wrong-room protection).
   // B4: verified via the signed session ticket (works on any serverless instance), falling back
@@ -48,17 +35,17 @@ async function handlePOST(req: Request) {
     if (!s || s.expired || s.conversationId !== body.conversationId || s.generation !== body.generation) return json({ error: 'wrong_room' }, 403)
   }
 
-  // Voice authorization: library voices are allowed; cloned voices require complete, unexpired consent.
-  if (!isLibraryVoice(body.voiceId)) {
-    { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
-    if (!voice || voice.voiceId !== body.voiceId) {
-      return json({ error: 'voice_not_authorized', message: 'Register this cloned voice with consent details first.' }, 403)
+  // B11/B12: voice authorization is decided by the SERVER registry (owner + consent + expiry + revocation + region),
+  // never by anything the browser claims. Library voices are open; a cloned voice must be this account's.
+  try {
+    const va = await authorizeVoice(voiceStoreFor(id.userId), id, body.voiceId, env.assemblyRegion())
+    if (!va.ok) {
+      if (va.reason === 'account_required') { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
+      return json({ error: 'voice_not_authorized', reason: va.reason, message: 'This voice is not authorized for your account.' }, 403)
     }
-    const u = clonedVoiceUsable(
-      { ...voice, id: '', label: '', ownerName: '', recordingLanguage: body.outputLanguage, provenance: 'other-recording', provenanceNote: '', fallbackVoiceId: '', qualityChecked: true },
-      env.assemblyRegion(),
-    )
-    if (!u.ok) return json({ error: 'voice_not_authorized', reason: u.reason }, 403)
+  } catch (e) {
+    if (e instanceof VoiceRegistryError) return json({ error: e.code, message: e.message }, e.status)
+    throw e
   }
 
   // Conversation Brake: an AI candidate is only approvable while its partner turn has not materially changed.

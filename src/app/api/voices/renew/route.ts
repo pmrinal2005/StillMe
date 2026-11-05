@@ -6,6 +6,9 @@ import { reserveTtsSpend } from '@/lib/server/spend'
 import { OutputLanguage, TTS_MODEL } from '@/lib/contracts'
 import { codePoints } from '@/lib/hash'
 import { withJsonErrors } from '@/lib/server/route'
+import { audit } from '@/lib/server/durable'
+import { recordRenewal, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
+import { isLibraryVoice } from '@/lib/voices'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,6 +33,13 @@ async function handlePOST(req: Request) {
   if (!key) return json({ error: 'assemblyai_not_configured' }, 503)
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'affirmation_required' }, 400)
+  // B11/B12: only the account that registered this voice may renew it (the AssemblyAI account is shared, so a voice id
+  // alone proves nothing). Revoked / unregistered / someone else's voice → refused BEFORE any billed provider call.
+  if (isLibraryVoice(parsed.data.voiceId)) return json({ error: 'library_voice' }, 400)
+  const store = voiceStoreFor(id.userId)
+  const reg = await store.get(id.userId, parsed.data.voiceId)
+  if (!reg) return json({ error: 'voice_not_authorized', reason: 'not_registered' }, 403)
+  if (reg.revoked) return json({ error: 'voice_not_authorized', reason: 'revoked' }, 403)
   // A9: renewal is billed speech → reserve against user ∩ project ∩ durable (was: per-instance user ledger only).
   const text = 'Ok'
   const spend = await reserveTtsSpend(id, req, codePoints(text))
@@ -54,8 +64,18 @@ async function handlePOST(req: Request) {
   await res.arrayBuffer()
   await spend.commit(Number(res.headers.get('x-tts-billed-characters')) || codePoints(text))
   const exp = Number(res.headers.get('x-tts-voice-expires-at'))
+  const providerExpiresAt = Number.isFinite(exp) && exp > 0 ? exp * 1000 : null
+  // B11: the renewal is recorded SERVER-side (the registry is the source of truth, not the browser).
+  let voice
+  try {
+    voice = await recordRenewal(store, id.userId, parsed.data.voiceId, providerExpiresAt ?? undefined)
+  } catch (e) {
+    if (e instanceof VoiceRegistryError) return json({ error: e.code }, e.status)
+    throw e
+  }
+  void audit(id.userId, 'consent_renewed', voice.id)
   console.log(JSON.stringify({ evt: 'consent_renewed', voice: parsed.data.voiceId.slice(0, 8) }))
-  return json({ ok: true, providerExpiresAt: Number.isFinite(exp) && exp > 0 ? exp * 1000 : null })
+  return json({ ok: true, providerExpiresAt, voice })
 }
 
 export const POST = withJsonErrors('voices/renew', handlePOST)

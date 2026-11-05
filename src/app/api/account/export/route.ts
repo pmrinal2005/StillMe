@@ -1,21 +1,26 @@
 import { getIdentity, json, unauthorized } from '@/lib/server/auth'
 import { ledgerFor } from '@/lib/server/state'
+import { exportAccountData } from '@/lib/server/account'
+import { voiceStoreFor } from '@/lib/server/voice-registry'
 import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
 
 /**
- * Server-side export. Most personal data (phrase boards, style card, voice registry) lives
- * on-device in IndexedDB and is exported client-side; Supabase rows are exported via RLS by the
- * client SDK. This returns what the app server holds: content-free usage counters only.
+ * B19: server-side export. Phrase boards, style card, preferences and consent history are exported from the DATABASE
+ * (service role, filtered to the caller) — not only from the browser — so the export is complete on a new device.
+ * Device-only data (IndexedDB) is still exported client-side.
  */
 async function handleGET(req: Request) {
   const id = await getIdentity(req)
   if (!id) return unauthorized()
+  const voices = id.kind === 'guest' ? [] : await voiceStoreFor(id.userId).list(id.userId).catch(() => [])
   return json({
     exportedAt: new Date().toISOString(),
-    identity: { userId: id.userId, kind: id.kind },
+    identity: { kind: id.kind },
     usage: ledgerFor(id.userId).snapshot(),
+    voices,
+    database: await exportAccountData(id),
     note: 'ReVOICE does not record audio or store transcripts. Third-party providers (AssemblyAI, Groq, LiveKit) retain data under their own policies.',
   })
 }
