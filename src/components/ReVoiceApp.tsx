@@ -89,6 +89,8 @@ export function ReVoiceApp() {
   const [turns, setTurns] = useState<PartnerTurn[]>([])
   const [listening, setListening] = useState<string>('off')
   const [session, setSession] = useState<Session | null>(null)
+  const [inviteBusy, setInviteBusy] = useState(false)
+  const [inviteMsg, setInviteMsg] = useState<string | null>(null)
   const [partnerPresent, setPartnerPresent] = useState(false)
   // B7: the mode radio reflects (and persists) the saved `sessionMode` preference instead of a hard-coded 'tabletop'.
   const mode: Mode = effectiveMode(prefs.sessionMode, !!status?.providers.livekit)
@@ -732,6 +734,23 @@ export function ReVoiceApp() {
   const holding = output.kind === 'approved_pending_gap'
   const cloudVoiceDown = !status?.providers.assemblyai || !online || output.kind === 'error'
   const elapsedMin = session ? Math.floor((Date.now() - session.startedAt) / 60000) : 0
+  // B17: invites are single use — the owner mints a fresh one for each additional partner.
+  const newPartnerLink = async () => {
+    const cur = sessionRef.current
+    if (!cur || cur.kind !== 'livekit' || !cur.room) return
+    setInviteBusy(true)
+    setInviteMsg(null)
+    try {
+      const r = await api.newInvite(cur.room, cur.ticket ?? null)
+      const next = { ...cur, invite: r.invite }
+      sessionRef.current = next
+      setSession(next)
+    } catch (e) {
+      setInviteMsg(e instanceof ApiError ? `Could not create a new link (${e.code}).` : 'Could not create a new link.')
+    } finally {
+      setInviteBusy(false)
+    }
+  }
   const inviteUrl = session?.invite ? `${typeof window !== 'undefined' ? window.location.origin : ''}/join#${encodeURIComponent(session.invite)}` : null
   const isGuest = status?.identity.kind === 'guest'
   const listenAvailable = !!(status?.providers.livekit || status?.providers.browserStt) && !isGuest
@@ -1024,11 +1043,14 @@ export function ReVoiceApp() {
                         )}
                         {inviteUrl && (
                           <div className="grid gap-1">
-                            <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (expires in 30 min)</label>
+                            <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (single use, expires in 30 min)</label>
                             <div className="flex flex-col gap-2 min-[420px]:flex-row">
                               <input id="invite-url" className="rv-input min-w-0 flex-1 text-sm" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} />
                               <button className="rv-btn" onClick={() => void navigator.clipboard?.writeText(inviteUrl)}><Icon name="copy" size={15} /> Copy</button>
+                              <button id="new-invite-button" className="rv-btn" disabled={inviteBusy} onClick={() => void newPartnerLink()}>New link</button>
                             </div>
+                            <p className="rv-muted text-xs">Each link admits one partner. After someone joins, make a new link for the next person.</p>
+                            {inviteMsg && <p role="status" className="rv-text-danger text-xs">{inviteMsg}</p>}
                           </div>
                         )}
                         <div className="flex flex-wrap gap-2">
@@ -1057,7 +1079,7 @@ export function ReVoiceApp() {
               )}
               {tab === 'bank' && <MessageBank />}
               {tab === 'privacy' && <PrivacyPanel />}
-              {tab === 'metrics' && (<div className="grid gap-4"><MetricsPanel status={status} />{status?.identity.kind === 'supabase' && <ReconcilePanel />}</div>)}
+              {tab === 'metrics' && (<div className="grid gap-4"><MetricsPanel status={status} />{status?.operator && <ReconcilePanel />}</div>)}
             </div>
           </div>
 

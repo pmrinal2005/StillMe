@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { api } from '@/lib/client/api'
+import { api, ApiError } from '@/lib/client/api'
 import { exportLocal, wipeLocal } from '@/lib/client/db'
 import { getSupabase } from '@/lib/client/supabase'
 
@@ -19,6 +19,7 @@ const REMOTE_TABLES = ['profiles', 'accessibility_prefs', 'style_cards', 'voice_
 export function PrivacyPanel() {
   const [msg, setMsg] = useState<string | null>(null)
   const [actions, setActions] = useState<string[]>([])
+  const [failed, setFailed] = useState<string[]>([])
 
   const doExport = async () => {
     const local = await exportLocal()
@@ -31,17 +32,29 @@ export function PrivacyPanel() {
   }
 
   const doDelete = async () => {
-    if (!confirm('Delete all ReVOICE data on this device and on the ReVOICE server? This cannot be undone.')) return
-    const r = await api.deleteServer().catch(() => null)
-    const sb = getSupabase()
-    if (sb) {
-      // RLS: these deletes only ever affect the signed-in user's rows.
-      for (const t of ['phrases', 'phrase_boards', 'style_cards', 'accessibility_prefs', 'voice_profiles', 'profiles'] as const) await sb.from(t).delete().not('user_id', 'is', null)
-      await sb.auth.signOut()
+    if (!confirm('Delete your ReVOICE account, cloud data and cloned-voice registrations, and all data on this device? This cannot be undone.')) return
+    setMsg(null)
+    setFailed([])
+    // B19: the server performs the REAL deletion (voices tombstoned, rooms closed, reservations settled, rows and auth
+    // user removed) and reports each step. Only wipe this device / sign out once the server says it all succeeded —
+    // a partial failure keeps the account signed in so the user can retry.
+    let r: Awaited<ReturnType<typeof api.deleteServer>> | null = null
+    try {
+      r = await api.deleteServer()
+    } catch (e) {
+      if (e instanceof ApiError && Array.isArray((e.body as { steps?: unknown }).steps)) {
+        const steps = (e.body as { steps: { step: string; ok: boolean }[] }).steps
+        setFailed(steps.filter((x) => !x.ok).map((x) => x.step))
+        setActions(((e.body as { thirdPartyActions?: string[] }).thirdPartyActions) ?? [])
+      }
+      setMsg('Deletion did not complete on the server, so nothing was removed from this device and you are still signed in. Try again.')
+      return
     }
+    const sb = getSupabase()
+    if (sb) await sb.auth.signOut().catch(() => undefined)
     await wipeLocal()
-    setActions(r?.thirdPartyActions ?? [])
-    setMsg('ReVOICE data deleted. Complete the third-party steps below. Reload to start fresh.')
+    setActions(r.thirdPartyActions ?? [])
+    setMsg('ReVOICE account and data deleted. Complete the third-party steps below. Reload to start fresh.')
   }
 
   return (
@@ -50,7 +63,7 @@ export function PrivacyPanel() {
       <ul className="ml-5 list-disc">
         <li>No audio recording by ReVOICE. No saved transcripts. Live captions and suggestions live in memory only.</li>
         <li>No raw-content logging or analytics: server logs contain only counts, durations, request IDs and error categories.</li>
-        <li>Phrase boards, message bank, voice registry and preferences are stored on this device.</li>
+        <li>Phrase boards, message bank and preferences are stored on this device. Cloned-voice consent and ownership are recorded on the ReVOICE server (a voice id alone never grants use).</li>
         <li><strong>Third parties</strong> process content under their own policies: AssemblyAI (speech), Groq (suggestions; enable Zero Data Retention — exception logs may otherwise be kept up to 30 days, US-based), LiveKit (media transport, no recording).</li>
         <li>Selecting the AssemblyAI EU region does not make the whole app EU-only (Groq is US-based).</li>
         <li>Not for real health information or clinical use.</li>
@@ -59,7 +72,8 @@ export function PrivacyPanel() {
         <button className="rv-btn" onClick={doExport}>Export my data (JSON)</button>
         <button className="rv-btn rv-btn-danger" onClick={doDelete}>Delete my data…</button>
       </div>
-      {msg && <p role="status" className="rv-text-ok">{msg}</p>}
+      {msg && <p role="status" className={failed.length || msg.startsWith('Deletion did not') ? 'rv-text-danger' : 'rv-text-ok'}>{msg}</p>}
+      {failed.length > 0 && <p role="alert" className="rv-text-danger">Failed steps: {failed.join(', ')}</p>}
       {actions.length > 0 && (
         <div role="note">
           <p className="font-semibold">Deleting ReVOICE data does not delete data held by third parties:</p>

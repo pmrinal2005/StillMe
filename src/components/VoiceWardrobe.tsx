@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { db, purgeVoiceCache, uid, type ConsentEvent } from '@/lib/client/db'
+import { db, purgeVoiceCache, syncVoicesFromServer, uid, type ConsentEvent } from '@/lib/client/db'
 import { api, ApiError } from '@/lib/client/api'
 import {
   CONSENT_PERIOD_DAYS,
@@ -23,7 +23,7 @@ const daysLeft = (ms: number) => Math.ceil((ms - Date.now()) / 86_400_000)
  * Voice wardrobe = authorized voice choices (library voices + registered cloned voices).
  *
  * Cloned voices are created ONLY in the AssemblyAI dashboard (record/upload → consent → biometric terms).
- * This panel records provenance and explicit consent, shows a Voice Identity Card with expiry, requires a
+ * This panel sends provenance and explicit consent to the SERVER registry (B11), which records it, shows a Voice Identity Card with expiry, requires a
  * typed affirmation for renewal, and disables revoked/expired voices with an explicit fallback.
  */
 export function VoiceWardrobe(props: {
@@ -41,6 +41,15 @@ export function VoiceWardrobe(props: {
   const [msg, setMsg] = useState<string | null>(null)
 
   const load = async () => {
+    // B11: the SERVER registry is the source of truth; the browser copy is only a display cache of it.
+    try {
+      const r = await api.voicesList()
+      await syncVoicesFromServer(r.voices)
+    } catch (e) {
+      // Guests / signed-out users have no registry: any cloned voice cached on this device is not authorized.
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) await syncVoicesFromServer([])
+      // Any other failure (offline): keep the cache for display; the server still re-checks every use.
+    }
     setClones(await db.voices.toArray())
     setHistory(await db.consentLog.orderBy('at').reverse().limit(20).toArray())
     props.onVoicesChanged?.()
@@ -54,6 +63,13 @@ export function VoiceWardrobe(props: {
 
   const revoke = async (v: ClonedVoiceProfile) => {
     if (!confirm(`Revoke "${v.label}"? It will no longer be usable in ReVOICE. Delete it in the AssemblyAI dashboard to remove it from the provider.`)) return
+    try {
+      // B11: revocation is recorded server-side first, so no device can keep using the clone.
+      await api.voiceRevoke(v.voiceId)
+    } catch (e) {
+      setMsg(e instanceof ApiError ? `Could not revoke: ${e.code}` : 'Could not revoke. Check your connection and try again.')
+      return
+    }
     await db.voices.update(v.id, { revoked: true })
     await db.consentLog.add({ id: uid(), voiceRecordId: v.id, action: 'revocation', at: Date.now() })
     await purgeVoiceCache(v.voiceId)
@@ -138,7 +154,7 @@ export function VoiceWardrobe(props: {
         </details>
       )}
       {!isLibraryVoice(voiceId) && !clones.some((c) => c.voiceId === voiceId) && (
-        <p role="alert" className="rv-alert rv-alert-warn mt-2 text-sm">The selected voice is not registered on this device; select a library voice.</p>
+        <p role="alert" className="rv-alert rv-alert-warn mt-2 text-sm">The selected voice is not registered to your account; select a library voice.</p>
       )}
     </section>
   )
@@ -156,15 +172,39 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
   const [err, setErr] = useState<string | null>(null)
   const set = (p: Partial<typeof f>) => setF((x) => ({ ...x, ...p }))
 
+  const [busy, setBusy] = useState(false)
   const save = async () => {
     if (!f.voiceId.trim() || !f.label.trim() || !f.ownerName.trim()) return setErr('Voice ID, label and owner name are required.')
     if (!f.speakerConsent || !f.rightsConfirmed || !f.biometricTermsAccepted) return setErr('All three consent confirmations are required.')
     if (!f.qualityChecked) return setErr('Confirm the owner reviewed a quality sample.')
-    const now = Date.now()
-    const rec: ClonedVoiceProfile = { id: uid(), ...f, voiceId: f.voiceId.trim(), consentAt: now, revoked: false }
-    await db.voices.add(rec)
-    await db.consentLog.add({ id: uid(), voiceRecordId: rec.id, action: 'initial', at: now })
-    onDone()
+    setBusy(true)
+    setErr(null)
+    try {
+      // B11: the SERVER records the consent (with its own timestamp), verifies the voice exists with the provider in this
+      // data zone and binds the voice id to this ONE account. Nothing is saved on the device unless that succeeds.
+      const r = await api.voiceRegister({
+        voiceId: f.voiceId.trim(), label: f.label.trim(), ownerName: f.ownerName.trim(), recordingLanguage: f.recordingLanguage,
+        provenance: f.provenance, provenanceNote: f.provenanceNote, fallbackVoiceId: f.fallbackVoiceId,
+        qualityChecked: true, speakerConsent: true, rightsConfirmed: true, biometricTermsAccepted: true,
+      })
+      await db.voices.put(r.voice)
+      await db.consentLog.add({ id: uid(), voiceRecordId: r.voice.id, action: 'initial', at: r.voice.consentAt })
+      onDone()
+    } catch (e) {
+      const code = e instanceof ApiError ? e.code : 'error'
+      const msg: Record<string, string> = {
+        account_required: 'Sign in with an account to register a cloned voice.',
+        voice_claimed: 'This voice id is already registered to another account.',
+        voice_tombstoned: 'This voice belonged to a deleted account and cannot be registered.',
+        voice_not_found: 'AssemblyAI does not know this voice id in this data zone. Create it in the dashboard first.',
+        registration_not_allowed: 'This deployment restricts who may register cloned voices.',
+        rate_limited: 'Too many attempts. Try again later.',
+        voice_registry_migration_required: 'The server database needs migration 0004 before cloned voices can be registered.',
+      }
+      setErr(msg[code] ?? `Registration failed (${code}).`)
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -227,7 +267,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
           </label>
           <label className="flex gap-2"><input type="checkbox" checked={f.qualityChecked} onChange={(e) => set({ qualityChecked: e.target.checked })} /> The owner listened to a sample in the dashboard and approves its quality.</label>
           {err && <p role="alert" className="rv-text-danger">{err}</p>}
-          <div className="flex flex-wrap gap-2"><button className="rv-btn" onClick={() => setStep(3)}>Back</button><button className="rv-btn rv-btn-primary" onClick={save}>Register voice</button></div>
+          <div className="flex flex-wrap gap-2"><button className="rv-btn" onClick={() => setStep(3)}>Back</button><button className="rv-btn rv-btn-primary" disabled={busy} onClick={save}>{busy ? 'Registering…' : 'Register voice'}</button></div>
         </div>
       )}
     </div>
@@ -246,7 +286,7 @@ function RenewForm({ voice, onDone }: { voice: ClonedVoiceProfile; onDone: (msg:
     try {
       const r = await api.renewConsent(voice.voiceId, typed, voice.recordingLanguage) // A9: explicit language
       const now = Date.now()
-      await db.voices.update(voice.id, { consentAt: now, providerExpiresAt: r.providerExpiresAt ?? undefined, speakerConsent: true })
+      await db.voices.put(r.voice ?? { ...voice, consentAt: now, providerExpiresAt: r.providerExpiresAt ?? undefined, speakerConsent: true })
       await db.consentLog.add({ id: uid(), voiceRecordId: voice.id, action: 'renewal', at: now })
       onDone(`Consent renewed. New expiry: ${fmt(r.providerExpiresAt ?? now + CONSENT_PERIOD_DAYS * 86_400_000)}.`)
     } catch (e) {
