@@ -18,6 +18,8 @@ export interface PartnerTurn {
   endOfTurn: boolean
   hash: string
   updatedAt: number
+  /** C #30: the revision number the SOURCE (worker) stamped on the last applied message, when it provides one. */
+  srcRevision?: number
 }
 
 const NEGATIONS = /\b(not|no|never|don'?t|doesn'?t|didn'?t|won'?t|can'?t|cannot|isn'?t|aren'?t|wasn'?t|shouldn'?t|wouldn'?t|actually|instead|rather|wait|cancel|nevermind|never mind|scratch that)\b/gi
@@ -25,6 +27,11 @@ const NUMBERISH = /\b(\d+(?:[.:/]\d+)*|one|two|three|four|five|six|seven|eight|n
 
 function tokens(s: string): string[] {
   return s.toLowerCase().replace(/[^\p{L}\p{N}'\s]/gu, ' ').split(/\s+/).filter(Boolean)
+}
+
+/** A turn long enough that a reply drafted before it could not have accounted for it (shared by client + server checks). */
+export function isSubstantiveTurn(text: string): boolean {
+  return tokens(text).length >= 3
 }
 
 function matches(re: RegExp, s: string): string[] {
@@ -82,9 +89,16 @@ export class TurnTracker {
   constructor(public conversationId: string, public generation = 0, private maxTurns = 12) {}
 
   /** Apply a Turn message (partial or final). Replaces any earlier revision of the same turn. */
-  async apply(msg: { turnId: number; text: string; endOfTurn: boolean }, now = Date.now()): Promise<{ turn: PartnerTurn; changed: boolean }> {
+  async apply(msg: { turnId: number; text: string; endOfTurn: boolean; revision?: number }, now = Date.now()): Promise<{ turn: PartnerTurn; changed: boolean }> {
     const existing = this.turns.get(msg.turnId)
+    // C #30 revision guard: a message the source numbered at or below what we already applied is a late/duplicate delivery
+    // (reordered data packets, a retransmit) and must never overwrite a newer revision. The FINAL of a turn is exempt from
+    // being treated as a duplicate only if it carries a higher revision, which the worker guarantees.
+    if (existing && msg.revision !== undefined && existing.srcRevision !== undefined && msg.revision <= existing.srcRevision) {
+      return { turn: existing, changed: false }
+    }
     if (existing && existing.text === msg.text && existing.endOfTurn === msg.endOfTurn) {
+      if (msg.revision !== undefined && (existing.srcRevision === undefined || msg.revision > existing.srcRevision)) existing.srcRevision = msg.revision
       return { turn: existing, changed: false }
     }
     // A finalized turn is authoritative; ignore late partials for it.
@@ -96,6 +110,7 @@ export class TurnTracker {
       endOfTurn: msg.endOfTurn,
       hash: await sha256Hex(msg.text),
       updatedAt: now,
+      srcRevision: msg.revision,
     }
     if (!existing) {
       this.order.push(msg.turnId)
@@ -145,7 +160,7 @@ export class TurnTracker {
     if (!cur) return 'new_turn'
     const latest = this.latest()
     // A newer partner turn that is substantive means the user's context has moved on.
-    if (latest && latest.turnId !== ref.turnId && tokens(latest.text).length >= 3) return 'new_turn'
+    if (latest && latest.turnId !== ref.turnId && isSubstantiveTurn(latest.text)) return 'new_turn'
     if (cur.hash === ref.transcriptHash) return null
     return materialChange(draftedFrom, cur.text)
   }

@@ -56,6 +56,8 @@ TOPIC_STATUS = "revoice.status"
 # session-level and never carry one; `error` is a speech error only — STT trouble uses `reconnecting` / `paused`.)
 SPEECH_STATUSES = frozenset({"speaking", "done", "cancelled", "uncertain", "rejected", "error"})
 CONTROL_QUEUE_MAX = 64
+WATCHDOG_TICK_S = 5.0
+RESELECT_MIN_INTERVAL_S = 1.0  # a challenger's voice triggers a re-evaluation at most this often
 
 STT_SAMPLE_RATE = 16_000
 TTS_SAMPLE_RATE = 24_000
@@ -152,6 +154,16 @@ async def _post_app(env: Any, path: str, payload: dict) -> dict | None:
         return None
 
 
+def _attempt_of(raw: Any) -> str | None:
+    """Best-effort playbackAttemptId of a (possibly malformed) speak control, so even a `rejected` status is
+    attempt-scoped (C #20). Only returned when it looks like an id; never trusted for anything but routing a status."""
+    try:
+        a = raw["approval"]["playbackAttemptId"]
+    except (KeyError, TypeError):
+        return None
+    return a if isinstance(a, str) and 0 < len(a) <= 64 else None
+
+
 # --------------------------------------------------------------------------- owner room
 
 @dataclass
@@ -170,6 +182,12 @@ class OwnerRoom:
     speak_task: asyncio.Task | None = None
     stt_task: asyncio.Task | None = None
     stt_stream: Any = None
+    stt_events: int = 0  # events delivered by the CURRENT stream (proof the provider is healthy)
+    bg: set = field(default_factory=set)  # strong refs to fire-and-forget tasks
+    wake_task: asyncio.Task | None = None
+    recover_task: asyncio.Task | None = None
+    _last_resel: float = 0.0
+    sleep: Any = asyncio.sleep  # injectable for tests
     # C #22/#23: which authorized track is transcribed is decided by the selector; each candidate track has a pump.
     selector: SourceSelector = field(default_factory=SourceSelector)
     pumps: dict[str, asyncio.Task] = field(default_factory=dict)
@@ -270,10 +288,10 @@ class OwnerRoom:
         self.ctl_task = asyncio.create_task(self._control_loop())
         room.on("track_published", lambda pub, p: self._consider(pub, p))
         room.on("track_subscribed", lambda track, pub, p: self._on_subscribed(track, pub, p))
-        room.on("track_unsubscribed", lambda track, pub, p: self._on_unsubscribed(p))
+        room.on("track_unsubscribed", lambda track, pub, p: self._on_unsubscribed(pub, p))
         room.on("track_unpublished", lambda pub, p: self._on_unpublished(pub, p))
-        room.on("track_muted", lambda p, pub: self._on_mute(p, True))
-        room.on("track_unmuted", lambda p, pub: self._on_mute(p, False))
+        room.on("track_muted", lambda p, pub: self._on_mute(p, pub, True))
+        room.on("track_unmuted", lambda p, pub: self._on_mute(p, pub, False))
         room.on("data_received", self._on_data)
         room.on("participant_connected", self._on_joined)
         room.on("participant_disconnected", self._on_left)
@@ -288,7 +306,7 @@ class OwnerRoom:
         await self.status("ready")
         log_event(evt="room_ready", room=room.name, kind=self.meta.mode)
 
-    # ---------------- track authorization
+    # ---------------- track authorization & source selection (C #22/#23)
     def _info(self, pub: Any, p: Any) -> TrackInfo:
         return TrackInfo(
             identity=p.identity,
@@ -299,50 +317,122 @@ class OwnerRoom:
             local_worker_identity=self.ctx.room.local_participant.identity,
         )
 
-    def _consider(self, pub: Any, p: Any) -> None:
-        ok, reason = authorize_track(
+    def _authorize(self, pub: Any, p: Any) -> tuple[bool, str]:
+        return authorize_track(
             self._info(pub, p),
             mode=self.meta.mode,  # type: ignore[arg-type]
             owner=self.meta.ownerIdentity,
             bound_phone_identity=self.bound_phone,
-            already_transcribing=self.transcribing,
         )
+
+    def _spawn(self, coro: Any) -> asyncio.Task:
+        """create_task that keeps a strong reference (fire-and-forget tasks must not be garbage collected mid-flight)."""
+        t = asyncio.create_task(coro)
+        self.bg.add(t)
+        t.add_done_callback(self.bg.discard)
+        return t
+
+    def _consider(self, pub: Any, p: Any) -> None:
+        ok, reason = self._authorize(pub, p)
         log_event(evt="track_decision", status="subscribe" if ok else "ignore", reason=reason)
-        if ok:
-            pub.set_subscribed(True)
+        if not ok:
+            return
+        pub.set_subscribed(True)
+        if p.identity in self.selector.sources:
+            # Already subscribed (e.g. a SIP participant that has JUST been bound): its priority changed -> re-rank now.
+            self.selector.add(p.identity, priority_for(reason), time.monotonic())
+            self._request_reselect()
 
     def _on_subscribed(self, track: Any, pub: Any, p: Any) -> None:
-        ok, _ = authorize_track(
-            self._info(pub, p), mode=self.meta.mode, owner=self.meta.ownerIdentity,  # type: ignore[arg-type]
-            bound_phone_identity=self.bound_phone, already_transcribing=self.transcribing,
-        )
+        ok, reason = self._authorize(pub, p)
         if not ok:  # defense in depth: never transcribe an unauthorized track
             pub.set_subscribed(False)
             return
-        self.transcribing = p.identity
-        self.audio_task = asyncio.create_task(self._pump_audio(track))
-        if self.listening:
-            self._open_stt()
+        ident = p.identity
+        self.selector.add(ident, priority_for(reason), time.monotonic())
+        self.selector.set_muted(ident, bool(getattr(pub, "muted", False)))
+        old = self.pumps.pop(ident, None)
+        if old is not None:
+            old.cancel()
+        # EVERY authorized track gets a pump (frames are read locally); only the ACTIVE source's frames reach STT.
+        self.pumps[ident] = self._spawn(self._pump_audio(ident, track))
+        self._request_reselect()
 
-    def _on_unsubscribed(self, p: Any) -> None:
-        if p.identity == self.transcribing:
-            self.transcribing = None
-            if self.audio_task:
-                self.audio_task.cancel()
-            asyncio.create_task(self._close_stt("track_gone"))
+    @staticmethod
+    def _is_mic_audio(pub: Any) -> bool:
+        return _track_kind(pub) == "audio" and _source(pub) == "microphone"
+
+    def _on_unsubscribed(self, pub: Any, p: Any) -> None:
+        if self._is_mic_audio(pub):
+            self._drop_source(p.identity)
+
+    def _on_unpublished(self, pub: Any, p: Any) -> None:
+        if self._is_mic_audio(pub):
+            self._drop_source(p.identity)
+
+    def _on_mute(self, p: Any, pub: Any, muted: bool) -> None:
+        if p.identity in self.selector.sources and self._is_mic_audio(pub):
+            self.selector.set_muted(p.identity, muted)
+            self._request_reselect()
+
+    def _drop_source(self, identity: str) -> None:
+        """The track / participant is gone: forget it and RESCAN (the other partner must not stay ignored forever)."""
+        t = self.pumps.pop(identity, None)
+        if t is not None:
+            t.cancel()
+        if self.selector.remove(identity):
+            self._request_reselect()
+
+    def _request_reselect(self) -> None:
+        if self.closing:
+            return
+        self._last_resel = time.monotonic()
+        self._spawn(self.reselect())
+
+    def _maybe_reselect(self, now: float) -> None:
+        if now - self._last_resel >= RESELECT_MIN_INTERVAL_S:
+            self._request_reselect()
+
+    async def reselect(self) -> None:
+        async with self.sel_lock:
+            if self.closing:
+                return
+            await self._reselect_locked()
+
+    async def _reselect_locked(self) -> None:
+        now = time.monotonic()
+        sw = self.selector.reselect(now)
+        if sw is None:
+            return
+        # The open turn belongs to the PREVIOUS speaker: close it with what was heard so it can never be
+        # mixed with the next speaker's words, then restart STT for the new source.
+        pending = self.adapter.flush()
+        await self._close_stt("source_switch")
+        if pending is not None:
+            await self.send(TOPIC_TRANSCRIPT, pending.to_dict())
+        self.preroll.drain()
+        self.wake.reset()
+        self.watchdog.set_source_active(sw.new is not None, now)
+        if sw.new is not None and self.listening:
+            self._open_stt()
+        log_event(evt="source_switch", reason=sw.reason, status="none" if sw.new is None else "active")
 
     # ---------------- STT lifecycle (billed by connected duration)
-    def _open_stt(self) -> None:
+    def _open_stt(self) -> Any:
         if self.stt_stream is not None or self.closing:
-            return
-        self.stt_stream = self.stt.stream()
+            return None
+        s = self.stt.stream()
+        self.stt_stream = s
         self.stt_meter.opened(time.monotonic())  # A10: billing starts when the socket connects
         self.adapter.closed = True  # new stream -> new turn ids continue monotonically
-        self.stt_task = asyncio.create_task(self._consume_stt(self.stt_stream))
+        self.stt_events = 0
+        self.stt_task = asyncio.create_task(self._consume_stt(s))
         log_event(evt="stt_open")
+        return s
 
     async def _close_stt(self, reason: str) -> None:
         s, self.stt_stream = self.stt_stream, None
+        task, self.stt_task = self.stt_task, None
         if s is None:
             return
         self.stt_meter.closed(time.monotonic())  # A10
@@ -351,28 +441,68 @@ class OwnerRoom:
             await asyncio.wait_for(s.aclose(), timeout=3)
         except Exception:  # noqa: BLE001
             pass
-        if self.stt_task:
-            self.stt_task.cancel()
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
         log_event(evt="stt_close", reason=reason)
 
-    async def _pump_audio(self, track: Any) -> None:
+    def _silence(self, frame: Any) -> Any:
+        from livekit import rtc
+
+        return rtc.AudioFrame(bytes(len(frame.data) * 2), frame.sample_rate, frame.num_channels, frame.samples_per_channel)
+
+    async def _pump_audio(self, identity: str, track: Any) -> None:
         from livekit import rtc
 
         stream = rtc.AudioStream(track, sample_rate=STT_SAMPLE_RATE, num_channels=1)
         try:
             async for ev in stream:
-                s = self.stt_stream
-                if s is None:
-                    continue  # paused: frames are dropped, nothing is sent or billed
-                frame = ev.frame
-                # B6 echo safety (ALL modes, architecture rule 5): while our synthesized voice plays — from
-                # this worker or from the owner's device during HTTP-TTS fallback — plus a mode-aware tail,
-                # send silence so our own output is never transcribed as partner input.
-                if self.echo.should_silence(time.monotonic(), gate_phase_speaking=self.gate.phase == "speaking"):
-                    frame = rtc.AudioFrame(bytes(len(frame.data) * 2), frame.sample_rate, frame.num_channels, frame.samples_per_channel)
-                s.push_frame(frame)
+                self._on_frame(identity, ev.frame)
         finally:
             await stream.aclose()
+
+    def _on_frame(self, identity: str, frame: Any) -> None:
+        """One 10 ms frame from ONE authorized track. Decides: ignore / feed selector / send to STT / wake detector."""
+        now = time.monotonic()
+        # B6 echo safety (ALL modes, architecture rule 5): while our synthesized voice plays — from this worker or
+        # from the owner's device during HTTP-TTS fallback — plus a mode-aware tail, our own output is never
+        # treated as partner input (no STT, no selector activity, no wake).
+        silenced = self.echo.should_silence(now, gate_phase_speaking=self.gate.phase == "speaking")
+        voiced = False if silenced else frame_rms(frame.data) >= VOICE_RMS
+        if voiced:
+            self.selector.voice(identity, now)
+        if identity != self.selector.active:
+            if voiced:
+                self._maybe_reselect(now)  # a challenger spoke: maybe the incumbent went stale
+            return
+        s = self.stt_stream
+        if s is not None:
+            s.push_frame(self._silence(frame) if silenced else frame)
+            return
+        # No billed stream. Only an IDLE pause with an active source may wake on voice (user/error pauses never do).
+        if not self.listening and self.watchdog.pause_reason == "idle" and self.watchdog.source_active and not self.closing:
+            if silenced:
+                self.wake.reset()
+                self.preroll.drain()
+                return
+            self.preroll.add(frame, now)
+            if self.wake.feed(frame_rms(frame.data), now) and (self.wake_task is None or self.wake_task.done()):
+                self.wake_task = self._spawn(self._wake())
+
+    async def _wake(self) -> None:
+        """C #24: voice resumed after an IDLE pause -> reopen STT and replay the short in-memory pre-roll."""
+        async with self.sel_lock:
+            frames = self.preroll.drain()
+            if self.closing or self.listening or self.watchdog.pause_reason != "idle" or self.selector.active is None:
+                return
+            self.wake.reset()
+            self.listening = True
+            self.watchdog.set_listening(True, time.monotonic())
+            s = self._open_stt()
+            if s is not None:
+                for f in frames:
+                    s.push_frame(f)
+        await self.status("listening")
+        log_event(evt="wake_on_voice")
 
     async def _consume_stt(self, s: Any) -> None:
         from livekit.agents import stt as lkstt
@@ -383,8 +513,12 @@ class OwnerRoom:
             lkstt.SpeechEventType.PREFLIGHT_TRANSCRIPT: "preflight",
             lkstt.SpeechEventType.FINAL_TRANSCRIPT: "final",
         }
+        failure: str | None = None
         try:
             async for ev in s:
+                if s is self.stt_stream:
+                    self.stt_events += 1
+                    self.backoff.healthy()  # the provider is delivering: forget earlier failures
                 k = kinds.get(ev.type)
                 if not k:
                     continue
@@ -394,15 +528,71 @@ class OwnerRoom:
                     continue
                 self.watchdog.partner_audio(time.monotonic())
                 await self.send(TOPIC_TRANSCRIPT, msg.to_dict())
+            if s is self.stt_stream and not self.closing:
+                failure = "StreamEnded"  # the provider closed the stream under us (we did not close it)
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as e:  # noqa: BLE001
-            log_event(evt="stt_error", code=type(e).__name__)
-            await self.status("error", reason="stt_unavailable")
-            self.stt_stream = None
-            self.stt_meter.closed(time.monotonic())  # A10: a dead socket is no longer billed
+            failure = type(e).__name__
+        if failure is not None and s is self.stt_stream and not self.closing:
+            await self._on_stt_failure(s, failure)
 
-    # ---------------- control (owner only)
+    async def _on_stt_failure(self, s: Any, code: str) -> None:
+        """C #25: a dead socket is no longer billed; recover with bounded backoff instead of staying deaf."""
+        log_event(evt="stt_error", code=code)
+        if self.stt_stream is s:
+            self.stt_stream = None
+            self.stt_task = None
+            self.stt_meter.closed(time.monotonic())  # A10
+        self.adapter.closed = True
+        if not self.recovering:
+            self.recover_task = self._spawn(self._recover_stt())
+
+    async def _recover_stt(self) -> None:
+        if self.recovering or self.closing:
+            return
+        self.recovering = True
+        try:
+            while True:
+                if self.closing or not self.listening or self.selector.active is None:
+                    return
+                delay = self.backoff.next_delay()
+                if delay is None:
+                    async with self.sel_lock:
+                        self.listening = False
+                        self.watchdog.set_listening(False, time.monotonic(), "error")  # needs an explicit Resume
+                        self.preroll.drain()
+                        self.wake.reset()
+                    log_event(evt="stt_gave_up", reason="stt_failed")
+                    await self.status("paused", reason="stt_failed")
+                    return
+                await self.status("reconnecting", reason=f"stt_retry_{self.backoff.attempts}_of_{self.backoff.max_attempts}")
+                await self.sleep(delay)
+                async with self.sel_lock:
+                    if self.closing or not self.listening or self.selector.active is None:
+                        return
+                    stream = self._open_stt()
+                if stream is None:
+                    return  # someone else (an explicit Resume) already reopened it
+                if await self._wait_healthy(stream):
+                    self.backoff.healthy()
+                    await self.status("listening")
+                    return
+        finally:
+            self.recovering = False
+
+    async def _wait_healthy(self, stream: Any) -> bool:
+        waited = 0.0
+        while waited < HEALTHY_AFTER_S:
+            if self.closing or self.stt_stream is not stream:
+                return False
+            if self.stt_events > 0:
+                return True
+            await self.sleep(0.25)
+            waited += 0.25
+        return not self.closing and self.stt_stream is stream
+
+    # ---------------- control (owner only) — C #21: strictly ordered, Stop overtakes
     def _on_data(self, packet: Any) -> None:
         if packet.topic != TOPIC_CONTROL or packet.participant is None:
             return
@@ -414,40 +604,66 @@ class OwnerRoom:
         except (ValueError, UnicodeDecodeError):
             return
         t = raw.get("type") if isinstance(raw, dict) else None
-        if t == "speak":
-            asyncio.create_task(self._speak(raw))
-        elif t == "stop":
+        if t == "stop":
+            # Handled SYNCHRONOUSLY, never queued behind the Speak it cancels: the attempt is tombstoned (or the running
+            # synthesis cancelled) before any queued Speak can be admitted.
             try:
-                asyncio.create_task(self._stop(StopControl.model_validate(raw).playbackAttemptId))
+                aid = StopControl.model_validate(raw).playbackAttemptId
             except ValidationError:
-                pass
+                return
+            cur = self._stop_now(aid)
+            self._spawn(self._announce_stop(cur, aid))
+        elif t in ("speak", "listen", "end", "hello", "gate"):
+            try:
+                self.ctl_queue.put_nowait((t, raw))
+            except asyncio.QueueFull:
+                log_event(evt="control_queue_full", kind=str(t))
+                if t == "speak":
+                    self._spawn(self.status("rejected", attempt=_attempt_of(raw), reason="busy"))
+
+    async def _control_loop(self) -> None:
+        """The ONE consumer of the owner's non-Stop controls: speak/listen/end are handled in arrival order."""
+        while not self.closing:
+            t, raw = await self.ctl_queue.get()
+            try:
+                await self._handle_control(t, raw)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — one bad control must never kill the consumer
+                log_event(evt="control_error", kind=str(t), code=type(e).__name__)
+
+    async def _handle_control(self, t: str, raw: dict) -> None:
+        if t == "speak":
+            await self._speak(raw)
         elif t == "listen":
             try:
-                asyncio.create_task(self._set_listening(ListenControl.model_validate(raw).enabled))
+                enabled = ListenControl.model_validate(raw).enabled
             except ValidationError:
-                pass
+                return
+            await self._set_listening(enabled)
         elif t == "end":
-            asyncio.create_task(self.end("user"))
+            await self.end("user")
         elif t == "hello":
             # B5: presence probe from the owner device. Answer only once fully set up.
             if self.source is not None and not self.closing:
-                asyncio.create_task(self.status("ready"))
+                await self.status("ready")
         elif t == "gate":
             try:
                 g = GateControl.model_validate(raw)
-                self.echo.owner_gate(g.on, time.monotonic(), g.ttlMs)
-                log_event(evt="owner_gate", status="on" if g.on else "off")
             except ValidationError:
-                pass
+                return
+            self.echo.owner_gate(g.on, time.monotonic(), g.ttlMs)
+            log_event(evt="owner_gate", status="on" if g.on else "off")
 
     async def _speak(self, raw: dict) -> None:
         try:
             ctl = SpeakControl.model_validate(raw)
         except ValidationError:
-            await self.status("rejected", reason="malformed")
+            await self.status("rejected", attempt=_attempt_of(raw), reason="malformed")
             return
+        aid = ctl.approval.playbackAttemptId
         if len(ctl.text) > MAX_SPOKEN_CHARS:
-            await self.status("rejected", reason="too_long")
+            await self.status("rejected", attempt=aid, reason="too_long")
             return
         try:
             attempt = await self.gate.admit(ctl.approval, ctl.text)
@@ -457,7 +673,10 @@ class OwnerRoom:
             # approvals (their id is untrusted); the durable sweep still settles those rows.
             if e.reason not in ("bad_signature", "malformed"):
                 self._report_tts(ctl.approval.approvalId, 0)
-            await self.status("rejected", attempt=ctl.approval.playbackAttemptId, reason=e.reason)
+            if e.reason == "cancelled":
+                await self.status("cancelled", attempt=aid)  # the owner already pressed Stop for this exact attempt
+            else:
+                await self.status("rejected", attempt=aid, reason=e.reason)
             if e.reason == "session_char_cap":
                 await self.status("paused", reason="budget")
             return
@@ -504,26 +723,57 @@ class OwnerRoom:
             # A1: exactly one usage report per approval — done, cancelled or failed.
             self._report_tts(attempt.approval_id, attempt.chars if sent and not failed_before_audio else 0)
 
-    async def _stop(self, attempt_id: str | None) -> None:
+    def _stop_now(self, attempt_id: str | None) -> Any:
+        """Synchronous half of Stop. Cancels the CURRENT attempt only when the Stop targets it (or names none); a Stop
+        for another attempt tombstones that one and never disturbs the speech that is playing."""
         cur = self.gate.stop(attempt_id)
-        if self.speak_task and not self.speak_task.done():
-            self.speak_task.cancel()  # cancels server synthesis (socket request aborted)
-        if self.source:
-            self.source.clear_queue()  # drop queued device audio immediately
-        self.echo.stop_speaking(time.monotonic())
-        if cur:
+        if cur is not None:
+            if self.speak_task and not self.speak_task.done():
+                self.speak_task.cancel()  # cancels server synthesis (socket request aborted)
+            if self.source:
+                self.source.clear_queue()  # drop queued device audio immediately
+            self.echo.stop_speaking(time.monotonic())
             log_event(evt="tts_stop", attempt=cur.attempt_id)
+        return cur
+
+    async def _announce_stop(self, cur: Any, attempt_id: str | None) -> None:
+        if cur is not None:
             await self.status("cancelled", attempt=cur.attempt_id)
+        elif attempt_id:
+            await self.status("cancelled", attempt=attempt_id)  # acknowledge a pre-cancel (its Speak is refused later)
+
+    async def _stop(self, attempt_id: str | None) -> None:
+        await self._announce_stop(self._stop_now(attempt_id), attempt_id)
 
     async def _set_listening(self, enabled: bool) -> None:
-        self.listening = enabled
-        self.watchdog.set_listening(enabled, time.monotonic())
-        if enabled and self.transcribing:
-            self._open_stt()
+        async with self.sel_lock:
+            now = time.monotonic()
+            self.listening = enabled
+            self.watchdog.set_listening(enabled, now, "user")
+            if enabled:
+                self.backoff.healthy()  # an explicit Resume starts with a fresh recovery budget
+                if self.selector.active is not None:
+                    self._open_stt()
+            else:
+                self.preroll.drain()
+                self.wake.reset()
+                await self._close_stt("paused")  # disconnecting (not muting) stops session billing
+        if enabled:
             await self.status("listening")
-        elif not enabled:
-            await self._close_stt("paused")  # disconnecting (not muting) stops session billing
+        else:
             await self.status("paused", reason="user")
+
+    async def _idle_pause(self) -> None:
+        """C #24: idle (nobody talked for IDLE_NO_AUDIO_S while a source was active). Closes the billed stream but keeps
+        reading frames locally so the partner's next words wake us up (see _on_frame / _wake)."""
+        async with self.sel_lock:
+            now = time.monotonic()
+            self.listening = False
+            self.watchdog.set_listening(False, now, "idle")
+            self.preroll.drain()
+            self.wake.reset()
+            await self._close_stt("idle")
+        await self.status("paused", reason="idle")
 
     # ---------------- participants & phone binding
     def _on_joined(self, p: Any) -> None:
@@ -531,7 +781,7 @@ class OwnerRoom:
             self.watchdog.owner_returned()
             # B5: the owner may have connected after our initial `ready` (which then went nowhere).
             if self.source is not None and not self.closing:
-                asyncio.create_task(self.status("ready"))
+                self._spawn(self.status("ready"))
         if _kind(p) == "sip":
             self._on_attrs(p)
 
@@ -546,19 +796,19 @@ class OwnerRoom:
         self.watchdog.phone_bound(time.monotonic(), mm)
         log_event(evt="phone_bound", minutes=mm)
         for pub in p.track_publications.values():
-            self._consider(pub, p)
+            self._consider(pub, p)  # phone priority (3) then takes the stream over from any partner/tabletop source
 
     def _on_left(self, p: Any) -> None:
         now = time.monotonic()
         if p.identity == self.meta.ownerIdentity:
             self.watchdog.owner_left(now)
+        self._drop_source(p.identity)  # rescan: whoever remains is selected (the phone hanging up falls back)
         if p.identity == self.bound_phone:
             used = self.watchdog.phone_minutes_used(now)
             self.watchdog.phone_ended()
             self.bound_phone = None
-            asyncio.create_task(_post_app(self.env, "/api/phone/usage", {"room": self.ctx.room.name, "minutes": round(used, 2)}))
+            self._spawn(_post_app(self.env, "/api/phone/usage", {"room": self.ctx.room.name, "minutes": round(used, 2)}))
             log_event(evt="phone_ended", minutes=round(used, 2))
-
     async def _hang_up_phone(self) -> None:
         from livekit import api
 
@@ -573,17 +823,15 @@ class OwnerRoom:
     # ---------------- watchdog loop & shutdown
     async def run_watchdog(self) -> None:
         while not self.closing:
-            await asyncio.sleep(5)
+            await self.sleep(WATCHDOG_TICK_S)
             if self.stt_meter.heartbeat_due(time.monotonic()):
-                asyncio.create_task(self._report_session(final=False))  # A10 heartbeat (sweep fallback)
+                self._spawn(self._report_session(final=False))  # A10 heartbeat (sweep fallback)
+            await self.reselect()  # periodic re-evaluation (stale supersede, lost events)
             r = self.watchdog.check(time.monotonic())
             if r is None:
                 continue
             if r == "idle_pause":
-                await self._close_stt("idle")
-                self.listening = False
-                self.watchdog.set_listening(False, time.monotonic())
-                await self.status("paused", reason="idle")
+                await self._idle_pause()
             elif r == "phone_cap":
                 await self._hang_up_phone()
             else:
@@ -595,6 +843,11 @@ class OwnerRoom:
             return
         self.closing = True
         await self._stop(None)
+        me = asyncio.current_task()
+        for t in [*self.pumps.values(), self.ctl_task, self.wake_task, self.recover_task]:
+            if t is not None and t is not me and not t.done():
+                t.cancel()
+        self.pumps.clear()
         await self._close_stt(reason)
         await self._hang_up_phone()
         # A10: authoritative final usage — connected STT minutes settle the room's reservation on any instance.
@@ -614,8 +867,6 @@ class OwnerRoom:
         except Exception:  # noqa: BLE001
             pass
         self.ctx.shutdown(reason)
-
-
 # --------------------------------------------------------------------------- phone call room
 
 async def run_call_room(ctx: Any, env: Any) -> None:

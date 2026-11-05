@@ -38,6 +38,9 @@ import { getSupabase } from '@/lib/client/supabase'
 import { AuthControls } from './AuthControls'
 import { FloatingTip, useFloatingTip } from './ui/FloatingTip'
 import { TurnTracker, type PartnerTurn } from '@/lib/turns'
+import { SerialQueue } from '@/lib/serial-queue'
+import { EngageTracker } from '@/lib/engage'
+import { CALLS_PER_TURN, finalRetryDelayMs, isRetryableSuggestError, SuggestionGate } from '@/lib/suggest-gate'
 import { partnerIsSpeaking, type OutputState } from '@/lib/output-state'
 import { CandidateSet as CandidateSetSchema, INPUT_LANGUAGES, type Candidate, type CandidateSet, type TurnRef } from '@/lib/contracts'
 import { randomId, sha256Hex } from '@/lib/hash'
@@ -61,7 +64,7 @@ interface Session {
   /** A7: browser-direct STT pseudo-session id (sd-…) used to settle its durable reservation. */
   sttSession?: string
 }
-interface ComposerSource { candidateSetId: string; candidateId: string; turn: TurnRef; original: string; intent: string }
+interface ComposerSource { candidateSetId: string; candidateId: string; turn: TurnRef; original: string; intent: string; proof?: string; draftedFrom: string }
 interface HistoryItem { speaker: 'partner' | 'user'; text: string }
 
 const INTENT_ORDER: Record<Candidate['intent'], number> = { continue: 0, clarify: 1, decline: 2, custom: 2 }
@@ -119,9 +122,15 @@ export function ReVoiceApp() {
   const listenerRef = useRef<LiveKitListener | DirectSttListener | null>(null)
   const trackerRef = useRef(new TurnTracker(`local-${randomId(6)}`))
   const setRef = useRef<{ set: CandidateSet; draftedFrom: string; used: boolean } | null>(null)
-  const engagedRef = useRef(false)
+  const engage = useRef(new EngageTracker())
+  const turnQueue = useRef(new SerialQueue())
+  const finalRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sttNoticeRef = useRef(false)
+  const composerValueRef = useRef('')
+  composerValueRef.current = composer
+  const [draftTick, setDraftTick] = useState(0)
   const historyRef = useRef<HistoryItem[]>([])
-  const callsPerTurn = useRef(new Map<number, { n: number; finalDone: boolean; lastHash?: string }>())
+  const gate = useRef(new SuggestionGate())
   const suggAbort = useRef<AbortController | null>(null)
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const heldContext = useRef<{ ref: TurnRef; text: string } | null>(null)
@@ -167,6 +176,8 @@ export function ReVoiceApp() {
       if (e instanceof ApiError && e.status === 401) setNeedsSignIn(true)
     }
   }, [])
+  const refreshStatusRef = useRef<(() => Promise<void>) | null>(null)
+  refreshStatusRef.current = refreshStatus
   useEffect(() => {
     refreshStatus()
     const t = setInterval(refreshStatus, 20_000)
@@ -227,6 +238,28 @@ export function ReVoiceApp() {
         get: async (voiceId, language, textHash) => getCachedAudio(voiceId, language, textHash),
         put: async (voiceId, language, textHash, pcm, sampleRate) => putCachedAudio({ voiceId, language, textHash, pcm, sampleRate }, isLibraryVoice(voiceId)),
       },
+      // C #26: "said" is committed when audio ACTUALLY starts — not when the request was dispatched, held for a gap or
+      // still waiting on the worker (a rejected/held/failed message used to be recorded as spoken and the composer
+      // cleared, losing the owner's words).
+      onHeard: ({ text, opts }) => {
+        count('approvedTurns')
+        const src = opts.source
+        if (src) {
+          count('aiApproved')
+          if (src.edited) count('aiEdited')
+          if (setRef.current) setRef.current.used = true
+        } else count('typed')
+        historyRef.current = [...historyRef.current, { speaker: 'user' as const, text: text.slice(0, 1200) }].slice(-6)
+        setLastSpoken(text)
+        // Clear the composer only if the owner has not changed it since pressing Speak.
+        if (composerValueRef.current === text) {
+          setComposer('')
+          setComposerSource(null)
+          setSourceStale(null)
+        }
+        engage.current.reset() // C #29
+        void refreshStatusRef.current?.()
+      },
       onState: (s) => {
         setOutput(s)
         if (s.kind === 'delivery_uncertain') count('uncertain')
@@ -273,16 +306,22 @@ export function ReVoiceApp() {
   const speech = speechRef.current
 
   // ---------------------------------------------------------------- suggestions
-  const requestSuggestions = useCallback(async (turn: PartnerTurn, final: boolean, preferredIntent?: string) => {
+  /**
+   * `origin`: 'auto' = drafted by the app from a transcript update; 'manual' = the owner pressed Redraft.
+   * C #27: a request that produced NO candidates hands its per-turn slot back, and the FINAL request gets one bounded
+   * retry after a transient failure. C #28: hitting the per-turn limit is shown to the owner, never swallowed.
+   */
+  const requestSuggestions = useCallback(async (turn: PartnerTurn, final: boolean, preferredIntent?: string, origin: 'auto' | 'manual' = 'auto'): Promise<'ok' | 'skipped' | 'limit' | 'failed' | 'superseded'> => {
     const p = prefsRef.current
     const st = statusRef.current
-    if (!p.aiSuggestions || !st?.providers.groq || !navigator.onLine) return
-    const c = callsPerTurn.current.get(turn.turnId) ?? { n: 0, finalDone: false }
-    if (c.n >= 2) return
-    c.n += 1
-    if (final) c.finalDone = true
-    c.lastHash = turn.hash
-    callsPerTurn.current.set(turn.turnId, c)
+    if (!p.aiSuggestions || !st?.providers.groq || !navigator.onLine) return 'skipped'
+    const g = gate.current
+    if (g.begin(turn.turnId, final, turn.hash) === 'limit') {
+      if (origin === 'manual') setSuggError(`Redraft limit reached for this partner turn (${CALLS_PER_TURN} drafts). A new partner turn unlocks more — or write your own words.`)
+      setDraftTick((n) => n + 1)
+      return 'limit'
+    }
+    setDraftTick((n) => n + 1)
     suggAbort.current?.abort()
     const ac = new AbortController()
     suggAbort.current = ac
@@ -290,6 +329,7 @@ export function ReVoiceApp() {
     setSuggError(null)
     const t0 = performance.now()
     const tracker = trackerRef.current
+    let produced = false
     try {
       const { set: raw } = await api.suggest(
         {
@@ -306,14 +346,15 @@ export function ReVoiceApp() {
       )
       const parsed = CandidateSetSchema.safeParse(raw) // validate client-side too
       if (!parsed.success) throw new Error('invalid_suggestions')
+      produced = true
       recordInterval('suggestion_request_to_ready', performance.now() - t0)
       if (marks.current.partnerFinal && final) recordInterval('partner_final_to_candidates', performance.now() - marks.current.partnerFinal)
       // Drop if the conversation already moved on materially.
-      if (tracker.staleness(parsed.data.turn, turn.text)) return
+      if (tracker.staleness(parsed.data.turn, turn.text)) return 'ok'
       const next = stableOrder(parsed.data)
       const cur = setRef.current
-      if (cur && engagedRef.current) {
-        // Selection stability: never move targets under the user's cursor.
+      if (cur && engage.current.active()) {
+        // Selection stability: never move targets under the user's cursor (C #29: only while the engagement lease is live).
         setPending(next)
         pendingDraftedFrom.current = turn.text
       } else {
@@ -323,29 +364,52 @@ export function ReVoiceApp() {
         setPending(null)
         setStale(null)
       }
+      return 'ok'
     } catch (e) {
-      if ((e as Error).name === 'AbortError') return
+      if ((e as Error).name === 'AbortError') {
+        if (!produced) g.fail(turn.turnId, final, turn.hash)
+        return 'superseded'
+      }
       const code = e instanceof ApiError ? e.code : (e as Error).message
+      if (!produced) g.fail(turn.turnId, final, turn.hash) // C #27: nothing was produced -> the slot comes back
+      if (code === 'superseded') return 'superseded' // a newer request replaced this one; it shows its own result
+      // C #27: the FINAL transcript's draft gets ONE bounded retry after a transient failure.
+      if (final && isRetryableSuggestError(code, !(e instanceof ApiError)) && g.takeFinalRetry(turn.turnId)) {
+        const delay = finalRetryDelayMs(e instanceof ApiError && typeof e.body.retryAfterMs === 'number' ? (e.body.retryAfterMs as number) : undefined)
+        if (finalRetryTimer.current) clearTimeout(finalRetryTimer.current)
+        finalRetryTimer.current = setTimeout(() => {
+          finalRetryTimer.current = null
+          const latest = trackerRef.current.get(turn.turnId)
+          // Only if that turn is still the newest thing the partner said and its final text is unchanged.
+          if (latest && latest.endOfTurn && latest.hash === turn.hash && trackerRef.current.latest()?.turnId === turn.turnId) void requestSuggestionsRef.current?.(latest, true, undefined, 'auto')
+        }, delay)
+        setSuggError(`Suggestions are retrying in ${Math.ceil(delay / 1000)} s…`)
+        return 'failed'
+      }
       setSuggError(code.startsWith('groq_') || code === 'budget' ? `Suggestions paused (${code.replace(/_/g, ' ')}). Type or use phrases.` : `Suggestions unavailable (${code}). Type or use phrases.`)
+      return 'failed'
     } finally {
       if (suggAbort.current === ac) {
         suggAbort.current = null
         setSuggLoading(false)
       }
+      setDraftTick((n) => n + 1)
     }
   }, [])
+  const requestSuggestionsRef = useRef<typeof requestSuggestions | null>(null)
+  requestSuggestionsRef.current = requestSuggestions
   const pendingDraftedFrom = useRef('')
 
   const scheduleSuggestions = useCallback((turn: PartnerTurn) => {
-    const c = callsPerTurn.current.get(turn.turnId)
+    const g = gate.current
     if (turn.endOfTurn) {
       if (debounce.current) clearTimeout(debounce.current)
-      if (c?.finalDone || c?.lastHash === turn.hash) return // identical to the provisional draft: no extra call
+      if (g.alreadyDrafted(turn.turnId, turn.hash)) return // identical to what was already drafted: no extra call
       void requestSuggestions(turn, true)
       return
     }
     // Draft opportunistically from a stable partial (≈1 update/s), at most once per turn before the final.
-    if ((c?.n ?? 0) > 0) return
+    if (g.hasProvisionalAttempt(turn.turnId)) return
     if (turn.text.trim().split(/\s+/).length < 6) return
     if (debounce.current) clearTimeout(debounce.current)
     debounce.current = setTimeout(() => {
@@ -355,9 +419,10 @@ export function ReVoiceApp() {
   }, [requestSuggestions])
 
   // ---------------------------------------------------------------- partner turns (revision-aware)
-  const onTurn = useCallback(async (t: TurnUpdate) => {
+  const onTurnNow = useCallback(async (t: TurnUpdate) => {
     const tracker = trackerRef.current
     const isNew = !tracker.get(t.turnId)
+    // C #30: `apply` ignores a message whose source revision is not newer than the one already applied.
     const { turn, changed } = await tracker.apply(t)
     if (!changed) return
     if (isNew) marks.current.firstPartial = performance.now()
@@ -388,6 +453,9 @@ export function ReVoiceApp() {
     }
     scheduleSuggestions(turn)
   }, [scheduleSuggestions, speech])
+  // C #30: turn messages are handled strictly one at a time, in arrival order (the handler awaits a hash; overlapping
+  // handlers could finish out of order and let an OLDER revision overwrite a NEWER one).
+  const onTurn = useCallback((t: TurnUpdate) => turnQueue.current.push(() => onTurnNow(t)), [onTurnNow])
 
   // Gap fallback: if a message is held and the partner has gone quiet, release it.
   useEffect(() => {
@@ -436,29 +504,29 @@ export function ReVoiceApp() {
     }
     const src = composerSourceRef.current
     const useSource = src && !sourceStale && text.trim().length > 0
-    const source: SpeakSource | undefined = useSource ? { candidateSetId: src.candidateSetId, candidateId: src.candidateId, turn: src.turn, edited: text !== src.original } : undefined
     const latest = trackerRef.current.latest()
+    // C #31: the approval carries the server-signed proof, what the set answered, and the newest turn THIS device holds, so
+    // the server can verify (fail-closed, on any instance) that the conversation has not moved on.
+    const source: SpeakSource | undefined = useSource
+      ? {
+          candidateSetId: src.candidateSetId,
+          candidateId: src.candidateId,
+          turn: src.turn,
+          edited: text !== src.original,
+          proof: src.proof,
+          draftedFrom: src.draftedFrom,
+          current: latest ? { turn: trackerRef.current.ref(latest), text: latest.text } : { turn: src.turn, text: src.draftedFrom },
+        }
+      : undefined
     const partnerSpeaking = !!sessionRef.current && partnerIsSpeaking(latest, Date.now())
     heldContext.current = latest ? { ref: trackerRef.current.ref(latest), text: latest.text } : null
+    // C #26: 'spoken' (direct: audio played), 'pending' (room: dispatched to the worker) and 'held' (waiting for a gap)
+    // are NOT committed here — the controller's onHeard fires once audio has actually started. A rejected / stopped /
+    // failed request leaves the composer exactly as the owner wrote it, so nothing is lost and nothing is recorded as said.
     const r = await speech.request(text, { source, partnerSpeaking, cacheable: opts.cacheable, speakNow: opts.speakNow })
-    if (r === 'spoken' || r === 'held') {
-      count('approvedTurns')
-      if (source) {
-        count('aiApproved')
-        if (source.edited) count('aiEdited')
-        if (setRef.current) setRef.current.used = true
-      } else count('typed')
-      historyRef.current = [...historyRef.current, { speaker: 'user' as const, text: text.slice(0, 1200) }].slice(-6)
-      setLastSpoken(text)
-      if (text === composer) {
-        setComposer('')
-        setComposerSource(null)
-        setSourceStale(null)
-      }
-      engagedRef.current = false
-      void refreshStatus()
-    }
-  }, [speech, sourceStale, composer, playCachedOffline, refreshStatus])
+    if (r === 'held') setNotice('Approved — it will be spoken at the next pause. Press “Speak now” to say it immediately.')
+    else if (r === 'rejected') setNotice('That message could not be approved, so nothing was spoken. Your words are still in the box.')
+  }, [speech, sourceStale, playCachedOffline])
 
   const stop = useCallback(() => {
     marks.current.stopPressed = performance.now()
@@ -517,8 +585,15 @@ export function ReVoiceApp() {
     speech?.setRoom(null)
     setSession(null)
     setPartnerPresent(false)
+    turnQueue.current.clear() // C #30: turn messages still queued belong to the session that just ended
+    if (finalRetryTimer.current) clearTimeout(finalRetryTimer.current)
+    finalRetryTimer.current = null
+    if (debounce.current) clearTimeout(debounce.current)
+    suggAbort.current?.abort()
+    engage.current.reset() // C #29
+    sttNoticeRef.current = false
     trackerRef.current.bumpGeneration() // invalidates all outstanding candidates/approvals
-    callsPerTurn.current.clear()
+    gate.current.clear()
     setSet(null)
     setPending(null)
     setRef.current = null
@@ -560,8 +635,27 @@ export function ReVoiceApp() {
         presenceRef.current.workerReady()
         setWorker(presenceRef.current.snapshot())
       }
+      // C #20: speech statuses are applied by the controller ONLY when they carry the current attempt's id.
       speech?.onWorkerStatus(s)
-      if (s.type === 'paused' && s.reason?.startsWith('budget')) void endSession('budget')
+      // C #24/#25: session-level statuses drive the listening indicator and tell the owner what the worker is doing.
+      if (s.type === 'listening') {
+        setListening('listening')
+        if (sttNoticeRef.current) {
+          sttNoticeRef.current = false
+          setNotice('Listening is back.')
+        }
+      } else if (s.type === 'reconnecting') {
+        setListening('reconnecting')
+        sttNoticeRef.current = true
+        setNotice('Transcription lost its connection — reconnecting automatically…')
+      } else if (s.type === 'paused') {
+        if (s.reason?.startsWith('budget')) void endSession('budget')
+        else {
+          setListening('paused')
+          if (s.reason === 'idle') setNotice('Listening paused after a quiet spell. It resumes by itself when your partner speaks again, or press Resume.')
+          else if (s.reason === 'stt_failed') setNotice('Transcription could not reconnect after several tries. Press Resume listening to try again — typing and phrases still work.')
+        }
+      }
       if (s.type === 'ended') void endSession(s.reason === 'timeout' ? 'timeout' : 'idle')
       // B5: rejections that trigger the automatic HTTP-TTS fallback are announced by onRouteFallback instead.
       if (s.type === 'rejected' && !FALLBACK_REJECTIONS.has(s.reason ?? '')) setNotice(`The voice worker refused that message (${s.reason ?? 'rejected'}). Nothing was spoken.`)
@@ -593,7 +687,9 @@ export function ReVoiceApp() {
         setSessionTicket(r.ticket) // B4: signed ticket authorizes approve/end on ANY serverless instance
         endedRef.current = null
         trackerRef.current = new TurnTracker(r.conversationId, 0)
-        callsPerTurn.current.clear()
+        gate.current.clear()
+        engage.current.reset()
+        turnQueue.current.clear()
         // B6: the listener applies the per-mode audio routing policy (partner-link: voice only on the partner's phone).
         const l = new LiveKitListener(listenerEvents, { url: r.url, token: r.token, publishMic: mode === 'tabletop', mode })
         listenerRef.current = l
@@ -637,7 +733,7 @@ export function ReVoiceApp() {
       } else if (st?.providers.browserStt) {
         const conv = randomId(10)
         trackerRef.current = new TurnTracker(conv, 0)
-        callsPerTurn.current.clear()
+        gate.current.clear()
         let maxMin = 20
         endedRef.current = null
         const s: Session = { kind: 'direct', conversationId: conv, generation: 0, invite: null, mode: 'tabletop', startedAt: Date.now(), maxMinutes: maxMin }
@@ -709,7 +805,7 @@ export function ReVoiceApp() {
   const useCandidate = (c: Candidate, s: CandidateSet) => {
     setComposer(c.text)
     speech?.edit(c.text)
-    setComposerSource({ candidateSetId: s.id, candidateId: c.id, turn: s.turn, original: c.text, intent: c.intent })
+    setComposerSource({ candidateSetId: s.id, candidateId: c.id, turn: s.turn, original: c.text, intent: c.intent, proof: s.proof, draftedFrom: setRef.current?.set.id === s.id ? setRef.current.draftedFrom : (trackerRef.current.get(s.turn.turnId)?.text ?? '') })
     setSourceStale(null)
     document.getElementById('composer-input')?.focus()
   }
@@ -720,12 +816,13 @@ export function ReVoiceApp() {
     setSet(pending)
     setPending(null)
     setStale(null)
-    engagedRef.current = false
+    engage.current.reset() // C #29
   }
   const regenerate = () => {
     const latest = trackerRef.current.latest()
     if (!latest) return setSuggError('No partner speech yet to draft from.')
-    void requestSuggestions(latest, latest.endOfTurn, prefs.preferredIntent)
+    // C #28: a refused redraft is explained (the button is also disabled with a visible count when none are left).
+    void requestSuggestions(latest, latest.endOfTurn, prefs.preferredIntent, 'manual')
   }
 
   // ---------------------------------------------------------------- render
@@ -975,11 +1072,13 @@ export function ReVoiceApp() {
                 loading={suggLoading}
                 error={suggError}
                 passport={set ? { turnId: set.turn.turnId, revision: set.turn.revision, final: set.status === 'final' } : null}
-                onEngage={() => { engagedRef.current = true }}
+                onEngage={() => engage.current.touch()}
                 onUse={useCandidate}
                 onAcceptPending={acceptPending}
                 onFeedback={(c, verdict) => void db.feedback.add({ id: randomId(8), at: Date.now(), intent: c.intent, verdict, edited: false })}
                 onRegenerate={regenerate}
+                redraftsLeft={(void draftTick, gate.current.remaining(latestTurn?.turnId))}
+                redraftLimit={CALLS_PER_TURN}
                 preferredIntent={prefs.preferredIntent}
                 setPreferredIntent={(s) => update({ preferredIntent: s })}
               />

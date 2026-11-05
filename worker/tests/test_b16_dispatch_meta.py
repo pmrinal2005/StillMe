@@ -84,9 +84,9 @@ def test_control_only_from_the_opaque_owner_identity_never_the_user_id():
 
 def test_tabletop_track_is_the_opaque_owner_and_partner_never_is():
     t = lambda ident, role=None: TrackInfo(identity=ident, participant_kind="standard", role=role, track_kind="audio", source="microphone", local_worker_identity="agent-1")
-    ok, _ = authorize_track(t(OPAQUE), mode="tabletop", owner=OPAQUE, bound_phone_identity=None, already_transcribing=None)
+    ok, _ = authorize_track(t(OPAQUE), mode="tabletop", owner=OPAQUE, bound_phone_identity=None)
     assert ok
-    ok, _ = authorize_track(t("partner-1", "partner"), mode="tabletop", owner=OPAQUE, bound_phone_identity=None, already_transcribing=None)
+    ok, _ = authorize_track(t("partner-1", "partner"), mode="tabletop", owner=OPAQUE, bound_phone_identity=None)
     assert not ok
-    ok, _ = authorize_track(t("partner-1", "partner"), mode="partner-link", owner=OPAQUE, bound_phone_identity=None, already_transcribing=None)
+    ok, _ = authorize_track(t("partner-1", "partner"), mode="partner-link", owner=OPAQUE, bound_phone_identity=None)
     assert ok

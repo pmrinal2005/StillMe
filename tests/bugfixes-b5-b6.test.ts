@@ -177,7 +177,8 @@ describe('B5 — speech is never blocked by a missing worker', () => {
   it('no acknowledgement from the worker → cancels the room attempt, then falls back', async () => {
     const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
     const { c, direct, fallbacks, deps } = setup({ route: () => 'room', room, ackMs: 15 })
-    expect(await c.request('Are you there?', { partnerSpeaking: false })).toBe('spoken')
+    expect(await c.request('Are you there?', { partnerSpeaking: false })).toBe('pending')
+    const roomAttempt = c.activeAttempt!
     expect(direct).toEqual([])
     await wait(40)
     expect(fallbacks).toEqual(['worker_no_ack'])
@@ -185,8 +186,8 @@ describe('B5 — speech is never blocked by a missing worker', () => {
     expect(direct).toHaveLength(1)
     expect(deps.directStream).toHaveBeenCalledTimes(1)
     // A late status for the abandoned room attempt is ignored.
-    c.onWorkerStatus({ type: 'speaking' })
-    c.onWorkerStatus({ type: 'done' })
+    c.onWorkerStatus({ type: 'speaking', playbackAttemptId: roomAttempt })
+    c.onWorkerStatus({ type: 'done', playbackAttemptId: roomAttempt })
     expect(c.state.kind).toBe('idle')
   })
 
@@ -194,11 +195,11 @@ describe('B5 — speech is never blocked by a missing worker', () => {
     const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
     const { c, direct, fallbacks } = setup({ route: () => 'room', room, ackMs: 15 })
     await c.request('Via the worker', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'speaking' })
+    c.onWorkerStatus({ type: 'speaking', playbackAttemptId: c.activeAttempt! })
     await wait(40)
     expect(fallbacks).toEqual([])
     expect(direct).toEqual([])
-    c.onWorkerStatus({ type: 'done' })
+    c.onWorkerStatus({ type: 'done', playbackAttemptId: c.activeAttempt! })
     expect(c.state.kind).toBe('idle')
   })
 
@@ -206,8 +207,8 @@ describe('B5 — speech is never blocked by a missing worker', () => {
     const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
     const { c, direct } = setup({ route: () => 'room', room, ackMs: 15 })
     await c.request('Half heard', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'speaking' })
-    c.onWorkerStatus({ type: 'error', reason: 'bad_signature' })
+    c.onWorkerStatus({ type: 'speaking', playbackAttemptId: c.activeAttempt! })
+    c.onWorkerStatus({ type: 'error', reason: 'bad_signature', playbackAttemptId: c.activeAttempt! })
     await wait(30)
     expect(direct).toEqual([])
     expect(c.state.kind).not.toBe('idle')
@@ -217,7 +218,7 @@ describe('B5 — speech is never blocked by a missing worker', () => {
     const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
     const { c, direct, fallbacks } = setup({ route: () => 'room', room })
     await c.request('Secret mismatch', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'rejected', reason: 'bad_signature' })
+    c.onWorkerStatus({ type: 'rejected', reason: 'bad_signature', playbackAttemptId: c.activeAttempt! })
     await wait(10)
     expect(fallbacks).toEqual(['worker_bad_signature'])
     expect(direct).toEqual([{ text: 'Secret mismatch', roomName: null }])
@@ -227,7 +228,7 @@ describe('B5 — speech is never blocked by a missing worker', () => {
     const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
     const { c, direct } = setup({ route: () => 'room', room })
     await c.request('Too much', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'rejected', reason: 'session_char_cap' })
+    c.onWorkerStatus({ type: 'rejected', reason: 'session_char_cap', playbackAttemptId: c.activeAttempt! })
     await wait(10)
     expect(direct).toEqual([])
     expect(c.state.kind).toBe('error')

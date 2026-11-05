@@ -186,7 +186,7 @@ describe('SpeechController invariants', () => {
     expect(room.speak).toHaveBeenCalledTimes(1)
     c.onWorkerStatus({ type: 'done', playbackAttemptId: 'someone-elses-attempt' })
     expect(c.state.kind).toBe('speaking')
-    c.onWorkerStatus({ type: 'speaking' })
+    c.onWorkerStatus({ type: 'speaking', playbackAttemptId: c.activeAttempt! })
     c.onRoomLost()
     expect(c.state.kind).toBe('delivery_uncertain')
   })
@@ -195,10 +195,11 @@ describe('SpeechController invariants', () => {
     const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
     const { c } = setup({ room })
     const a = await c.request('Hello', { partnerSpeaking: false })
-    expect(a).toBe('spoken')
+    expect(a).toBe('pending') // C #26: dispatched to the worker, NOT yet heard
+    const attempt = c.activeAttempt!
     c.stop()
     expect(room.stop).toHaveBeenCalledTimes(1)
-    c.onWorkerStatus({ type: 'done' })
+    c.onWorkerStatus({ type: 'done', playbackAttemptId: attempt })
     expect(c.state.kind).toBe('interrupted')
   })
 

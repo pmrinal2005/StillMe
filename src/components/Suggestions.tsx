@@ -26,6 +26,9 @@ export function Suggestions(props: {
   onAcceptPending: () => void
   onFeedback: (c: Candidate, verdict: 'sounds_like_me' | 'not_my_meaning') => void
   onRegenerate: () => void
+  /** C #28: how many more drafts this partner turn allows (the limit used to be enforced silently). */
+  redraftsLeft: number
+  redraftLimit: number
   preferredIntent: string
   setPreferredIntent: (s: string) => void
 }) {
@@ -95,8 +98,15 @@ export function Suggestions(props: {
           Preferred third intent (optional)
           <input className="rv-input font-normal" maxLength={80} placeholder="e.g. change the subject, make a joke" value={props.preferredIntent} onChange={(e) => props.setPreferredIntent(e.target.value)} />
         </label>
-        <button className="rv-btn" onClick={props.onRegenerate} disabled={loading}><Icon name="refresh" size={16} /> Redraft</button>
+        <button className="rv-btn" onClick={props.onRegenerate} disabled={loading || props.redraftsLeft <= 0} aria-describedby="redraft-note">
+          <Icon name="refresh" size={16} /> Redraft
+        </button>
       </div>
+      <p id="redraft-note" className={`text-xs ${props.redraftsLeft <= 0 ? 'rv-alert rv-alert-warn' : 'rv-muted'}`} aria-live="polite" data-testid="redraft-note">
+        {props.redraftsLeft <= 0
+          ? `Redraft limit reached for this turn (${props.redraftLimit} drafts). A new partner turn unlocks more — or write your own words.`
+          : `${props.redraftsLeft} of ${props.redraftLimit} drafts left for this partner turn.`}
+      </p>
     </section>
   )
 }

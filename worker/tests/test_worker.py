@@ -234,12 +234,15 @@ def ti(identity, kind="standard", role=None, track="audio", source="microphone")
     ],
 )
 def test_authorize_track(info, mode, ok):
-    assert authorize_track(info, mode=mode, owner=OWNER, bound_phone_identity=None, already_transcribing=None)[0] is ok
+    assert authorize_track(info, mode=mode, owner=OWNER, bound_phone_identity=None)[0] is ok
 
 
-def test_single_stream_and_bound_phone():
-    assert authorize_track(ti("p2", role="partner"), mode="remote", owner=OWNER, bound_phone_identity=None, already_transcribing="p1") == (False, "single_stream")
-    assert authorize_track(ti("sip-1", kind="sip"), mode="remote", owner=OWNER, bound_phone_identity="sip-1", already_transcribing=None)[0]
+def test_second_partner_is_authorized_but_selector_keeps_a_single_stream():
+    """C #22: authorization no longer encodes "who was first" (that left the 2nd partner ignored forever). Both partners are
+    authorized; the SourceSelector (tests/test_c_sources.py) guarantees only ONE of them is transcribed."""
+    assert authorize_track(ti("p2", role="partner"), mode="remote", owner=OWNER, bound_phone_identity=None) == (True, "partner")
+    assert authorize_track(ti("sip-1", kind="sip"), mode="remote", owner=OWNER, bound_phone_identity="sip-1") == (True, "phone_bound")
+    assert authorize_track(ti("sip-2", kind="sip"), mode="remote", owner=OWNER, bound_phone_identity="sip-1") == (False, "phone_unbound")
 
 
 def test_control_only_from_owner():
@@ -252,8 +255,13 @@ def test_control_only_from_owner():
 def test_watchdog_paths():
     w = Watchdog(started_at=0, max_minutes=20)
     assert w.check(10) is None
-    assert w.check(config.IDLE_NO_AUDIO_S + 1) == "idle_pause"
-    w.set_listening(False, 400)
+    # C #24: with NO active source the idle timer must not run (it used to pause listening before a partner even joined)
+    assert w.check(config.IDLE_NO_AUDIO_S + 1) is None
+    w.set_source_active(True, 100)
+    assert w.check(100 + config.IDLE_NO_AUDIO_S - 1) is None
+    assert w.check(100 + config.IDLE_NO_AUDIO_S + 1) == "idle_pause"
+    w.set_listening(False, 400, "idle")
+    assert w.pause_reason == "idle"
     assert w.check(1000) is None  # paused: no idle billing
     w.owner_left(1000)
     assert w.check(1000 + config.OWNER_GONE_GRACE_S) == "room_exit"

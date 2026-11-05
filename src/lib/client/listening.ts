@@ -12,7 +12,7 @@ import { Room, RoomEvent, Track, type RemoteParticipant, type LocalTrackPublicat
 import { ControlMessage, DataTopics, StatusMessage, TranscriptMessage, type Approval } from '../contracts'
 import { ownerPlaysLocally, type ConversationMode } from '../audio-routing'
 
-export interface TurnUpdate { turnId: number; text: string; endOfTurn: boolean }
+export interface TurnUpdate { turnId: number; text: string; endOfTurn: boolean; /** C #30: source revision stamped by the worker (absent for browser-direct STT) */ revision?: number }
 export interface ListenerEvents {
   onTurn: (t: TurnUpdate) => void
   onSpeechStarted?: () => void
@@ -54,7 +54,7 @@ export class LiveKitListener {
             const m = TranscriptMessage.safeParse(raw)
             if (m.success) {
               if (m.data.speechStarted) this.ev.onSpeechStarted?.()
-              else this.ev.onTurn({ turnId: m.data.turnId, text: m.data.text, endOfTurn: m.data.endOfTurn })
+              else this.ev.onTurn({ turnId: m.data.turnId, text: m.data.text, endOfTurn: m.data.endOfTurn, revision: m.data.revision })
             }
           } else if (topic === DataTopics.status) {
             const s = StatusMessage.safeParse(raw)

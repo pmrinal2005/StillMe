@@ -177,7 +177,7 @@ describe('B5 hardening — worker leaves while a room utterance is in flight', (
   it('audio may have been heard → Delivery uncertain, never an automatic replay', async () => {
     const { c, direct } = setup()
     await c.request('Half said', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'speaking' })
+    c.onWorkerStatus({ type: 'speaking', playbackAttemptId: c.activeAttempt! })
     expect(await c.onWorkerLeft()).toBe('uncertain')
     expect(direct).toEqual([])
     expect(c.state.kind).toBe('delivery_uncertain')
@@ -187,11 +187,11 @@ describe('B5 hardening — worker leaves while a room utterance is in flight', (
     const { c, direct } = setup()
     expect(await c.onWorkerLeft()).toBe('none')
     await c.request('Done already', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'speaking' })
-    c.onWorkerStatus({ type: 'done' })
+    c.onWorkerStatus({ type: 'speaking', playbackAttemptId: c.activeAttempt! })
+    c.onWorkerStatus({ type: 'done', playbackAttemptId: c.activeAttempt! })
     expect(await c.onWorkerLeft()).toBe('none')
     await c.request('Cancelled', { partnerSpeaking: false })
-    c.onWorkerStatus({ type: 'cancelled' })
+    c.onWorkerStatus({ type: 'cancelled', playbackAttemptId: c.activeAttempt! })
     expect(await c.onWorkerLeft()).toBe('none') // stale pending state is cleared on cancel
     expect(direct).toEqual([])
   })

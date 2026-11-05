@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { getCandidates, latestTurn } from '@/lib/server/state'
+import { latestTurn } from '@/lib/server/state'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
 import { ApproveRequest, type TurnRef } from '@/lib/contracts'
 import { ApprovalError, issueApproval } from '@/lib/approval'
-import { materialChange } from '@/lib/turns'
+import { evaluateCandidateSource } from '@/lib/candidate-proof'
 import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { withJsonErrors } from '@/lib/server/route'
 import { reserveTtsSpend } from '@/lib/server/spend'
@@ -48,17 +48,21 @@ async function handlePOST(req: Request) {
     throw e
   }
 
-  // Conversation Brake: an AI candidate is only approvable while its partner turn has not materially changed.
+  // Conversation Brake (C #31, FAIL-CLOSED): an AI candidate is only approvable with a valid signed proof AND while its
+  // partner turn has not materially changed. Verified statelessly (HMAC) so it works on ANY serverless instance — the old
+  // check consulted process memory and, when the set was unknown (another instance), skipped the brake entirely.
+  // User-typed text (no `source`) needs no proof: those are the owner's own words.
   let currentTurn: TurnRef | undefined
   if (body.source) {
-    const set = getCandidates(body.source.candidateSetId)
-    if (set && set.owner !== id.userId) return json({ error: 'wrong_user' }, 403)
-    if (set && set.expiresAt < Date.now()) return json({ error: 'stale_candidate', message: 'These suggestions expired. Review fresh ones.' }, 409)
-    const latest = latestTurn(body.source.turn)
-    if (latest && set) {
-      const reason = latest.ref.transcriptHash === set.turn.transcriptHash ? null : materialChange(set.draftedFrom, latest.text)
-      currentTurn = reason ? latest.ref : body.source.turn
-    }
+    const verdict = await evaluateCandidateSource({
+      secret: env.approvalSecret(),
+      owner: id.userId,
+      body,
+      source: body.source,
+      serverLatest: latestTurn(body.source.turn),
+    })
+    if (!verdict.ok) return json({ error: verdict.error, reason: verdict.reason, message: verdict.message }, verdict.status)
+    currentTurn = verdict.turn
   }
   let approval
   try {

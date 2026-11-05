@@ -106,7 +106,7 @@ export class BudgetLedger {
   private outstanding = new Map<string, number>() // conversationId -> in-flight count
   private perTurn = new Map<string, number>() // `${conv}:${gen}:${turn}` -> calls
   private retryAfterUntil = 0
-  private reservations = new Map<string, { key: string; kind: 'groq' | 'tts'; tokens: number; chars: number; usd: number; conv?: string }>()
+  private reservations = new Map<string, { key: string; kind: 'groq' | 'tts'; tokens: number; chars: number; usd: number; conv?: string; turnKey?: string }>()
   /** Lifetime spend estimate across days (for reserve protection). Seed from DB in production. */
   public lifetimeUsd = 0
 
@@ -160,7 +160,7 @@ export class BudgetLedger {
     this.outstanding.set(opts.conversationId, (this.outstanding.get(opts.conversationId) ?? 0) + 1)
     this.perTurn.set(opts.turnKey, (this.perTurn.get(opts.turnKey) ?? 0) + 1)
     if (this.perTurn.size > 500) this.perTurn.delete(this.perTurn.keys().next().value!)
-    this.reservations.set(id, { key: s.day, kind: 'groq', tokens, chars: 0, usd: 0, conv: opts.conversationId })
+    this.reservations.set(id, { key: s.day, kind: 'groq', tokens, chars: 0, usd: 0, conv: opts.conversationId, turnKey: opts.turnKey })
     return { ok: true, id }
   }
 
@@ -177,8 +177,38 @@ export class BudgetLedger {
   }
 
   /** Release a reservation that never reached the provider (keeps the request count — it was attempted). */
-  releaseGroq(id: string) {
+  releaseGroq(id: string, opts: { refundTurn?: boolean } = {}) {
+    const turnKey = this.reservations.get(id)?.turnKey
     this.commitGroq(id, 0)
+    // C #27: a call that produced NO candidates (Groq 5xx / 429 / bad output) must not use up one of the per-turn calls,
+    // otherwise the owner's single bounded FINAL retry is refused as `groq_turn_cap`. The request itself stays counted
+    // against rpm / daily requests, so a flapping provider is still bounded.
+    if (opts.refundTurn && turnKey) {
+      const n = (this.perTurn.get(turnKey) ?? 0) - 1
+      if (n > 0) this.perTurn.set(turnKey, n)
+      else this.perTurn.delete(turnKey)
+    }
+  }
+
+  /**
+   * C #27: a request that was SUPERSEDED (aborted by a newer one) before Groq answered did no useful work. Give back
+   * everything: the in-flight slot, the tokens, the request count, the rpm slot AND the per-turn call slot — otherwise
+   * a superseded provisional draft burns one of the two per-turn calls and the FINAL retry is refused as `groq_turn_cap`.
+   */
+  refundGroq(id: string) {
+    const r = this.reservations.get(id)
+    if (!r) return
+    this.reservations.delete(id)
+    if (r.conv) this.outstanding.set(r.conv, Math.max(0, (this.outstanding.get(r.conv) ?? 1) - 1))
+    const s = this.state(Date.now(), r.key)
+    s.groqTokens = Math.max(0, s.groqTokens - r.tokens)
+    s.groqRequests = Math.max(0, s.groqRequests - 1)
+    if (r.turnKey) {
+      const n = (this.perTurn.get(r.turnKey) ?? 0) - 1
+      if (n > 0) this.perTurn.set(r.turnKey, n)
+      else this.perTurn.delete(r.turnKey)
+    }
+    this.minuteWindow.pop()
   }
 
   reserveTts(chars: number, now = Date.now()): { ok: true; id: string } | { ok: false; reason: DenyReason } {

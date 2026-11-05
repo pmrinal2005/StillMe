@@ -56,6 +56,8 @@ export const CandidateSet = z.object({
   createdAt: z.number().int(),
   expiresAt: z.number().int(),
   candidates: z.array(Candidate).length(3),
+  /** C #31: stateless HMAC proof (server-signed) binding owner + set + turn + candidate texts. Required to approve an AI candidate. */
+  proof: z.string().max(3000).optional(),
 })
 export type CandidateSet = z.infer<typeof CandidateSet>
 
@@ -102,7 +104,18 @@ export const ApproveRequest = z.object({
   outputLanguage: OutputLanguage,
   /** If approving an AI candidate, the candidate set + turn it was bound to. Absent for user-typed text. */
   source: z
-    .object({ candidateSetId: z.string(), candidateId: z.string(), turn: TurnRef, edited: z.boolean() })
+    .object({
+      candidateSetId: z.string(),
+      candidateId: z.string(),
+      turn: TurnRef,
+      edited: z.boolean(),
+      /** C #31: the CandidateSet.proof the server issued (verified statelessly on any instance). */
+      proof: z.string().max(3000).optional(),
+      /** C #31: the exact partner text the set was drafted from (its hash is inside the proof). */
+      draftedFrom: z.string().max(2000).optional(),
+      /** C #31: the latest partner turn the owner's device holds AT APPROVAL TIME (verified by hash). */
+      current: z.object({ turn: TurnRef, text: z.string().max(4000) }).optional(),
+    })
     .optional(),
 })
 export type ApproveRequest = z.infer<typeof ApproveRequest>
@@ -161,7 +174,7 @@ export const ControlMessage = z.discriminatedUnion('type', [
 ])
 
 export const StatusMessage = z.object({
-  type: z.enum(['speaking', 'done', 'cancelled', 'uncertain', 'rejected', 'error', 'listening', 'paused', 'ended', 'ready']),
+  type: z.enum(['speaking', 'done', 'cancelled', 'uncertain', 'rejected', 'error', 'listening', 'paused', 'reconnecting', 'ended', 'ready']),
   playbackAttemptId: z.string().optional(),
   reason: z.string().max(200).optional(),
 })

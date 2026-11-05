@@ -37,6 +37,11 @@ export interface SpeakSource {
   candidateId: string
   turn: import('../contracts').TurnRef
   edited: boolean
+  /** C #31: the server-signed proof of the candidate set, and the exact partner text it was drafted from. */
+  proof?: string
+  draftedFrom?: string
+  /** C #31: the newest partner turn this device holds at approval time (the server verifies it by hash). */
+  current?: { turn: import('../contracts').TurnRef; text: string }
 }
 
 export interface SpeakOptions {
@@ -71,9 +76,23 @@ export interface SpeechDeps {
     put(voiceId: string, language: string, textHash: string, pcm: ArrayBuffer, sampleRate: number): Promise<void>
   }
   onState(s: OutputState): void
+  /**
+   * C #26: fires ONCE per utterance, when audio has actually started (room: the worker's `speaking` status; direct: the
+   * first audio chunk / cached clip). The caller commits "this was said" (history, composer clear, counters) HERE — not when
+   * the request was merely dispatched, held for a gap, or still waiting for the worker (a rejected/held/failed message used
+   * to be recorded as spoken and the composer cleared, losing the owner's words).
+   */
+  onHeard?(h: { attemptId: string; text: string; opts: SpeakOptions }): void
   onMark?(name: 'approval' | 'tts_request' | 'first_audio' | 'done' | 'stop_silenced', at: number, info?: { warm?: boolean; cached?: boolean }): void
   now?(): number
 }
+
+/**
+ * C #20: statuses that describe ONE utterance. They are applied only when they carry the CURRENT attempt's id. Session-level
+ * statuses (`listening` / `paused` / `reconnecting` / `ready` / `ended`) are never speech outcomes — they used to be able to
+ * acknowledge, finish or fail whatever utterance happened to be in flight.
+ */
+export const SPEECH_STATUS_TYPES: ReadonlySet<string> = new Set(['speaking', 'done', 'cancelled', 'uncertain', 'rejected', 'error'])
 
 export const MAX_HOLD_MS = 45_000
 export const ROOM_ACK_TIMEOUT_MS = 5_000
@@ -90,6 +109,8 @@ export class SpeechController {
   private lastTtsAt = -Infinity
   private roomAck: ReturnType<typeof setTimeout> | null = null
   private roomPending: { approval: Approval; text: string; opts: SpeakOptions; acked: boolean } | null = null
+  /** C #26: the utterance whose audio has not been heard yet (cleared by noteHeard / Stop / failure). */
+  private heardPending: { attemptId: string; text: string; opts: SpeakOptions } | null = null
   /** Route actually used by the most recent utterance (diagnostics/UI). */
   lastRoute: SpeechRoute | null = null
 
@@ -97,6 +118,11 @@ export class SpeechController {
 
   private now() {
     return this.d.now ? this.d.now() : Date.now()
+  }
+
+  /** The room utterance a worker status must name to be applied (C #20); null when none is in flight. */
+  get activeAttempt(): string | null {
+    return this.roomAttempt
   }
 
   /** Which transport approved speech would use right now. */
@@ -110,12 +136,20 @@ export class SpeechController {
     this.d.onState(this.state)
   }
 
+  /** C #26: audio for the current utterance has started — commit it exactly once. */
+  private noteHeard() {
+    const h = this.heardPending
+    if (!h) return
+    this.heardPending = null
+    this.d.onHeard?.(h)
+  }
+
   edit(text: string) {
     this.emit({ type: 'edit', text })
   }
 
   /** User pressed Speak (or Speak Now). Freezes exact text → approval → speech (or hold for a gap). */
-  async request(text: string, opts: SpeakOptions & { speakNow?: boolean }): Promise<'spoken' | 'held' | 'rejected' | 'busy' | 'stopped' | 'uncertain' | 'error'> {
+  async request(text: string, opts: SpeakOptions & { speakNow?: boolean }): Promise<'spoken' | 'pending' | 'held' | 'rejected' | 'busy' | 'stopped' | 'uncertain' | 'error'> {
     if (this.state.kind === 'speaking') return 'busy'
     const frozen = text // exact displayed text — no trimming or rewriting after approval
     const hash = await this.d.sha256(frozen)
@@ -185,6 +219,7 @@ export class SpeechController {
     if (route === 'room' && approvedFor === 'room' && this.d.room) {
       const attemptId = approval.playbackAttemptId
       this.attempt = attemptId
+      this.heardPending = { attemptId, text, opts }
       this.lastRoute = 'room' // set before 'started' so onState observers see the right route
       this.emit({ type: 'started', attemptId })
       this.d.onMark?.('tts_request', this.now(), { warm: this.now() - this.lastTtsAt < 5 * 60_000 })
@@ -204,7 +239,7 @@ export class SpeechController {
           }
         }, this.d.roomAckTimeoutMs ?? ROOM_ACK_TIMEOUT_MS)
       }
-      return 'spoken' as const // completion arrives via onWorkerStatus()
+      return 'pending' as const // C #26: dispatched, NOT yet heard — completion/audio arrives via onWorkerStatus()
     }
 
     // Direct HTTP TTS. A room-bound approval is not valid at /api/speak (roomName must be null), so a
@@ -269,6 +304,7 @@ export class SpeechController {
   private async playDirect(approval: Approval, text: string, opts: SpeakOptions) {
     const attemptId = approval.playbackAttemptId
     this.attempt = attemptId
+    this.heardPending = { attemptId, text, opts }
     this.lastRoute = 'direct'
     this.emit({ type: 'started', attemptId })
     const warm = this.now() - this.lastTtsAt < 5 * 60_000
@@ -282,6 +318,7 @@ export class SpeechController {
         this.d.player.begin(attemptId)
         this.d.player.push(attemptId, new Uint8Array(hit.pcm), hit.sampleRate)
         this.emit({ type: 'first_audio' })
+        this.noteHeard()
         this.d.onMark?.('first_audio', this.now(), { warm: true, cached: true })
         await this.d.player.drained()
         if (this.stopped.has(attemptId)) return 'stopped' as const
@@ -311,6 +348,7 @@ export class SpeechController {
         if (!audioStarted) {
           audioStarted = true
           this.emit({ type: 'first_audio' })
+          this.noteHeard()
           this.d.onMark?.('first_audio', this.now(), { warm })
         }
         this.d.player.push(attemptId, value, sampleRate)
@@ -348,23 +386,30 @@ export class SpeechController {
     }
   }
 
-  /** Worker status for room-mode playback. Late statuses for other attempts are ignored. */
-  onWorkerStatus(s: { type: string; playbackAttemptId?: string; reason?: string }) {
-    if (!this.roomAttempt || (s.playbackAttemptId && s.playbackAttemptId !== this.roomAttempt)) return
-    if (this.stopped.has(this.roomAttempt)) return
+  /**
+   * Worker status for room-mode playback. Returns true when it was applied to the current utterance.
+   * C #20: a speech status is applied ONLY when it carries the current attempt's id; a status without one, for another
+   * attempt, or a session-level status never touches the current utterance.
+   */
+  onWorkerStatus(s: { type: string; playbackAttemptId?: string; reason?: string }): boolean {
+    if (!SPEECH_STATUS_TYPES.has(s.type)) return false
+    if (!s.playbackAttemptId || !this.roomAttempt || s.playbackAttemptId !== this.roomAttempt) return false
+    if (this.stopped.has(this.roomAttempt)) return false
     if (this.roomPending) this.roomPending.acked = true
     this.clearRoomAck()
     if ((s.type === 'rejected' || s.type === 'error') && FALLBACK_REJECTIONS.has(s.reason ?? '') && !(this.state.kind === 'speaking' && this.state.audioStarted)) {
       // The worker cannot serve speech (e.g. mismatched secret). Nothing was heard → HTTP TTS.
       void this.fallbackToDirect(`worker_${s.reason}`)
-      return
+      return true
     }
     switch (s.type) {
       case 'speaking':
         this.emit({ type: 'first_audio' })
+        this.noteHeard()
         this.d.onMark?.('first_audio', this.now())
         break
       case 'done':
+        this.noteHeard() // `done` can overtake `speaking` for a very short phrase
         this.roomAttempt = null
         this.roomPending = null
         this.lastTtsAt = this.now()
@@ -373,21 +418,25 @@ export class SpeechController {
         break
       case 'uncertain':
         if (this.state.kind === 'speaking' && !this.state.audioStarted) this.emit({ type: 'first_audio' })
+        this.noteHeard() // audio started on the worker: part of it may have been heard — it counts as said, never replayed
         this.roomAttempt = null
         this.roomPending = null
         this.emit({ type: 'network_failed', reason: s.reason ?? 'delivery_uncertain' })
         break
       case 'rejected':
       case 'error':
+        this.heardPending = null
         this.roomAttempt = null
         this.roomPending = null
         this.emit({ type: 'failed', message: s.reason ?? s.type })
         break
       case 'cancelled':
+        this.heardPending = null
         this.roomAttempt = null
         this.roomPending = null
         break
     }
+    return true
   }
 
   /**
@@ -425,12 +474,14 @@ export class SpeechController {
     this.clearRoomAck()
     this.roomAttempt = null
     this.roomPending = null
+    this.heardPending = null // stopped before any audio: it was never said, so it is never committed
     this.held = null
     this.emit({ type: 'stop' })
   }
 
   reset() {
     this.held = null
+    this.heardPending = null
     this.emit({ type: 'reset' })
   }
 
