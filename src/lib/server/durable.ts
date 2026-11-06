@@ -148,3 +148,17 @@ export async function settlePhoneCallDurable(room: string, usedMinutes: number) 
     () => undefined,
   )
 }
+
+/**
+ * D #46 — durable month total of phone minutes (migration 0002 `phone_month_usage`: settled minutes, or the reservation for
+ * calls that never settled). null = no durable store / the read failed (callers then fall back to the instance figure).
+ */
+export async function phoneMonthMinutesDurable(month: string): Promise<number | null> {
+  const sb = adminClient()
+  if (!sb) return null
+  const { data, error } = await sb.rpc('phone_month_usage', { p_month: month })
+  if (error || !data) return null
+  const row = Array.isArray(data) ? data[0] : data
+  const n = Number((row as { minutes?: unknown } | undefined)?.minutes)
+  return Number.isFinite(n) && n >= 0 ? n : null
+}

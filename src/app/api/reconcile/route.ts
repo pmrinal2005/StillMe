@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { getIdentity, isOperator, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { monthKey, phoneMonthUsed, projectLedger, rv } from '@/lib/server/state'
+import { monthKey, phoneMonthUsedDurable, projectLedger, rv } from '@/lib/server/state'
 import { adminClient, audit, usageSummary } from '@/lib/server/durable'
 import { LIMITS } from '@/lib/budget'
 import { TELEPHONY } from '@/lib/features'
@@ -39,7 +39,7 @@ async function appEstimate() {
     source: durable ? 'supabase' : 'process-memory',
     assemblyaiUsd: +assemblyUsd.toFixed(4),
     byProvider: durable ?? { today: snap },
-    phone: { month: monthKey(), minutesUsed: phoneMonthUsed(), cap: TELEPHONY.monthlyInboundMinutesCap, included: 50 },
+    phone: { month: monthKey(), minutesUsed: await phoneMonthUsedDurable(), cap: TELEPHONY.monthlyInboundMinutesCap, included: 50 },
     limits: { protectedReserveUsd: LIMITS.assembly.protectedReserveUsd, totalCreditUsd: LIMITS.assembly.totalCreditUsd },
   }
 }

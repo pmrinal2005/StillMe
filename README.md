@@ -106,6 +106,32 @@ ASSEMBLYAI_API_KEY=... REVOICE_BASE_URL=https://stillmee.vercel.app npm run smok
 
 Regression tests: `tests/bugfixes-b11-b19.test.ts` (31 tests) and `worker/tests/test_b16_dispatch_meta.py`. Totals now: **191 web tests / 15 suites, 65 worker tests**; `tsc`, `next build` and the secret scan are clean.
 
+## 0e. D-series (Medium: auth, session and client) — bugs #32–#46
+
+| # | Bug | Fix | Where |
+|---|---|---|---|
+| D32 | Every API call built a new Supabase client and made a network round-trip to validate the token (also on the 20 s status poll) | One client per instance; a verified token is cached for 30 s (never past its own JWT expiry, keyed by SHA-256 so the raw bearer is never stored); concurrent requests share one in-flight check; stale-if-error when Auth is briefly unreachable | `src/lib/server/auth.ts` |
+| D33 | A signed-in user whose token went missing silently ran on guest limits | Browser sends `x-revoice-expect-account`; the server labels the guest fallback `x-revoice-auth: missing_token` | `auth.ts`, `auth-note.ts`, `route.ts` |
+| D34 | One stale/invalid token was a hard 401 that broke even guest features | Invalid/expired token → labelled capped guest; client refreshes the session and retries **once**; a dead refresh token signs out locally and tells the user; transient errors (429/408/5xx/offline) never sign out | `src/lib/client/api.ts` |
+| D35 | Starting a session always sent `replace:true`, silently ending the user's session on another device | Server decides with `planExistingSessions` (own stale room replaced; another device's room = `409 session_active`); the client asks before sending `replace:true` | `session-replace.ts`, `livekit/session/route.ts`, `ReVoiceApp.tsx` |
+| D36 | Signing out left a billed listening session running | Sign out ends the session first (token still valid), then drops the account; `SIGNED_OUT` from any source is a safety net | `AuthControls.tsx`, `ReVoiceApp.tsx` |
+| D37 | A provider 401 (bad server key) reached the browser as 401 "sign in"; provider 429s looked like our own budget pause | Our own vocabulary: 401/403 → 502 `speech_provider_auth`; 402 → `provider_credit_exhausted`; 429 → `rate_limited`+Retry-After; bad input → 422. **Follow-up (found by the live check):** a network-level failure reaching the provider is now a retryable 502 `speech_provider_unreachable`, and unexpected 500s name the exception *class* (never its message) | `assemblyai.ts`, `speak/route.ts`, `route.ts` |
+| D38 | Consent expiry header is epoch **seconds** but was used as milliseconds; real expiry never stored | `parseVoiceExpiryMs` (seconds→ms, tolerant of ms) shared by speak/renew; real expiry persisted | `assemblyai.ts`, `voices.ts`, `voice-registry.ts` |
+| D39 | Unregistered/expired clone fell back to Audrey (English) for every output language | `fallbackVoiceFor(language, preferred)` | `voices.ts`, `ReVoiceApp.tsx` |
+| D40 | Hold expiry compared the server's `exp` with the device clock | Durations only (`exp − iat` vs. time held on the device) | `shortcuts.ts`, `speech.ts` |
+| D41 | Ctrl/Cmd+Enter bypassed the "Speak exactly this?" dialog and double-requested | `ctrlEnterAction` is inert while confirming / in flight / empty | `shortcuts.ts` |
+| D42 | Minute counter only moved when something else re-rendered | 15 s tick while a session is active; clamped, never negative | `ReVoiceApp.tsx` |
+| D43 | `new Int16Array(buffer, oddOffset)` threw `RangeError` and killed playback; cancelled-attempt set grew forever | `DataView` decode; set capped at 32 | `pcm-player.ts` |
+| D44 | Worklet kept every 3rd sample (no low-pass) → aliasing | Hann-windowed-sinc FIR low-pass downsampler; the tested source string **is** the worklet | `downsample.ts`, `listening.ts` |
+| D45 | The wait for the SIP caller sat outside `try/finally`, so a no-show left the call room alive | Everything inside `try/finally`; each cleanup step independent | `worker/revoice_worker/main.py` |
+| D46 | Phone month total read only per-instance memory (every cold Vercel instance started at 0) | `phoneMonthUsedDurable` reads `phone_month_usage` and uses the instance figure only as a floor (`max`) | `state.ts`, `durable.ts`, phone/reconcile routes |
+
+Regression tests: `tests/bugfixes-d32-d46.test.ts` (69 tests) and `worker/tests/test_d45_call_room_cleanup.py` (6). Totals now: **301 web tests / 17 suites, 117 worker tests**; `tsc`, `next build` and the secret scan are clean. `vercel.json` is asserted by tests (Next.js, `npm ci`, API `maxDuration` 60 ≤ Hobby 300, `no-store` on `/api`, service-worker headers); no Cloudflare/Hono anywhere.
+
+**Live checks (real AssemblyAI key, read from the environment only, never committed):** `npm run smoke:live` — 28/28 provider checks (all 24 library voices synthesize in their language, Hindi rejected 422, universal-3-6-pro STT round trip); `npm run smoke:worker` — all pass (plugin TTS → plugin STT → TurnAdapter, revisions strictly increase, one authoritative final).
+
+**Open item on the deployed site (not caused by D-series code):** against `https://stillmee.vercel.app` `/api/speak` returns an intermittent generic 500 `internal_error` for guests (roughly every other request), while the same build run locally with the same key returned 200 on 12/12 calls and the provider called directly returned 200 on 6/6. The deployed build predates the follow-up above, so the exception class is invisible. After redeploying, the 500 body includes `"kind": "<ExceptionClass>"` and the Vercel function log has the `route_error` line — that identifies it in one request.
+
 ## 1. Current status
 
 | Area | State |

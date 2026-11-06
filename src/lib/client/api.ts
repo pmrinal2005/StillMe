@@ -4,7 +4,7 @@ import type { ClonedVoiceProfile } from '../voices'
 import { getSupabase } from './supabase'
 
 /**
- * D #33/#34 — client side of the guest-fallback protocol (see src/lib/server/auth-note.ts).
+ * D #33/#34 — client side of the guest-fallback protocol (see auth-note.ts on the server side).
  *
  * The server now answers a request whose token was missing/invalid/unverifiable as a CAPPED GUEST and labels the response
  * with `x-revoice-auth`. Here we (a) tell the server when we believe we are signed in (so a lost token is detected, not

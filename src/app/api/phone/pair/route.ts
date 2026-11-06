@@ -1,6 +1,6 @@
 import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { phoneMonthUsed, rv } from '@/lib/server/state'
+import { phoneMonthUsedDurable, rv } from '@/lib/server/state'
 import { resolveCurrentSession, ticketFrom } from '@/lib/server/session'
 import { allowedCallMinutes, hashPairCode, newPairCode, PAIR_CODE_TTL_MS } from '@/lib/phone'
 import { TELEPHONY } from '@/lib/features'
@@ -23,7 +23,8 @@ async function handlePOST(req: Request) {
   if (!env.phoneInboundEnabled() || !env.livekitUrl()) return json({ error: 'phone_disabled' }, 503)
   const s = await resolveCurrentSession(id.userId, ticketFrom(req)).catch(() => null) // B4: ticket, not instance memory
   if (!s) return json({ error: 'no_active_session', message: 'Start a listening session first.' }, 409)
-  const minutes = allowedCallMinutes(phoneMonthUsed())
+  const monthUsed = await phoneMonthUsedDurable() // D #46: durable total, not this instance's memory
+  const minutes = allowedCallMinutes(monthUsed)
   if (minutes <= 0) return json({ error: 'phone_cap', message: `The ${TELEPHONY.monthlyInboundMinutesCap}-minute monthly phone allowance is used.` }, 429)
 
   const now = Date.now()
@@ -40,7 +41,7 @@ async function handlePOST(req: Request) {
   codes.set(key, { userId: id.userId, room: s.room, expiresAt, attempts: 0 })
   logEvent({ evt: 'phone_code_issued', room: s.room })
   void audit(id.userId, 'phone_code_issued', s.room)
-  return json({ code, expiresAt, number: env.phoneNumberDisplay() ?? null, maxCallMinutes: minutes, monthUsed: phoneMonthUsed(), monthCap: TELEPHONY.monthlyInboundMinutesCap })
+  return json({ code, expiresAt, number: env.phoneNumberDisplay() ?? null, maxCallMinutes: minutes, monthUsed, monthCap: TELEPHONY.monthlyInboundMinutesCap })
 }
 
 /** Owner revokes any outstanding code (e.g. read aloud to the wrong person). */

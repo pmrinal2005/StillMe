@@ -132,6 +132,23 @@ export function phoneMonthUsed(now = Date.now()): number {
 }
 
 /**
+ * D #46 — month usage that survives serverless instances.
+ *
+ * Bug: `phoneMonthUsed` only knew THIS instance's memory, so on Vercel every cold instance started the month at 0 and the
+ * 40-minute cap (10 minutes of headroom under LiveKit's 50 included) could be exceeded several times over.
+ * Now the durable total (Postgres `phone_month_usage`) is read first and the instance figure is used only as a FLOOR
+ * (max of the two), so it can never under-count: the instance may know about a call the database has not seen yet.
+ */
+export async function phoneMonthUsedDurable(
+  now = Date.now(),
+  read: (month: string) => Promise<number | null> = async (m) => (await import('./durable')).phoneMonthMinutesDurable(m),
+): Promise<number> {
+  const local = phoneMonthUsed(now)
+  const durable = await read(monthKey(now)).catch(() => null)
+  return durable === null ? local : Math.max(local, durable)
+}
+
+/**
  * B3: settle a session's listening reservation exactly once per instance.
  * - The in-memory ledgers are refunded only if THIS instance made the reservation (cache hit).
  * - The durable reservation (if any) is settled by the caller via settleDurable — Postgres makes

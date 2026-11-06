@@ -25,8 +25,9 @@ export function newRequestId(): string {
   return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-export function errorResponse(status: number, error: string, message: string, requestId: string): Response {
-  return new Response(JSON.stringify({ error, message, requestId }), {
+export function errorResponse(status: number, error: string, message: string, requestId: string, kind?: string): Response {
+  // `kind` is the exception CLASS NAME only (e.g. "TypeError") — never its message, which may contain user text.
+  return new Response(JSON.stringify({ error, message, requestId, ...(kind ? { kind } : {}) }), {
     status,
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-revoice-request-id': requestId },
   })
@@ -66,7 +67,7 @@ export function withJsonErrors<A extends unknown[]>(route: string, handler: Rout
     } catch (e) {
       const c = classifyError(e)
       logEvent({ evt: 'route_error', route, status: c.status, code: c.error, kind: e instanceof Error ? e.name : typeof e, req: requestId })
-      return stamp(errorResponse(c.status, c.error, c.message, requestId))
+      return stamp(errorResponse(c.status, c.error, c.message, requestId, c.status === 500 && e instanceof Error && /^[A-Za-z]{1,40}$/.test(e.name) ? e.name : undefined))
     }
   }
 }

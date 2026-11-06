@@ -66,6 +66,18 @@ export function providerFailure(e: AssemblyError): { status: number; body: { err
   return { status: 502, body: { error: 'upstream_error', retryable: e.retryable } }
 }
 
+/**
+ * D #37 (follow-up, found by the live check against the deployed site) — a NETWORK-level failure reaching the provider
+ * (DNS, reset, TLS, `fetch failed`) is not an AssemblyError, so /api/speak answered it with a generic 500 `internal_error`
+ * and the visitor was told "something went wrong on the server". It is a transient, retryable upstream problem: 502.
+ */
+export function isNetworkFailure(e: unknown): boolean {
+  if (!(e instanceof Error) || e.name === 'AbortError') return false
+  if (e instanceof TypeError) return true // undici: "fetch failed"
+  const c = (e as { code?: unknown; cause?: { code?: unknown } }).code ?? (e as { cause?: { code?: unknown } }).cause?.code
+  return typeof c === 'string' && /^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|UND_ERR_.*)$/.test(c)
+}
+
 /** The provider reports expiry as epoch SECONDS (X-TTS-Voice-Expires-At). Returns epoch ms, or undefined if absent/implausible. */
 export function parseVoiceExpiryMs(header: string | null | undefined): number | undefined {
   const n = Number(header)

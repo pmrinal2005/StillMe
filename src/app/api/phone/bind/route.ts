@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { monthKey, phoneMonthUsed, rv } from '@/lib/server/state'
+import { monthKey, phoneMonthUsedDurable, rv } from '@/lib/server/state'
 import { allowedCallMinutes, BINDING_TTL_MS, hashPairCode, isPairCode, signPhoneBinding } from '@/lib/phone'
 import { verifyWorkerAuth } from '@/lib/server/worker-auth'
 import { audit, reservePhoneCallDurable } from '@/lib/server/durable'
@@ -68,7 +68,7 @@ async function handlePOST(req: Request) {
     await dropPairCode(store, room)
     return json({ error: 'call_in_progress' }, 409)
   }
-  const minutes = allowedCallMinutes(phoneMonthUsed(now))
+  const minutes = allowedCallMinutes(await phoneMonthUsedDurable(now))
   if (minutes <= 0) {
     await dropPairCode(store, room)
     return json({ error: 'phone_cap' }, 429)

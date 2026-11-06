@@ -4,7 +4,7 @@ import { durableReplay, recordUsage } from '@/lib/server/durable'
 import { reserveTtsSpend } from '@/lib/server/spend'
 import { logEvent } from '@/lib/server/log'
 import { PRICES } from '@/lib/budget'
-import { AssemblyError, providerFailure, synthesizeApproved } from '@/lib/server/assemblyai'
+import { AssemblyError, isNetworkFailure, providerFailure, synthesizeApproved } from '@/lib/server/assemblyai'
 import { SpeakRequest } from '@/lib/contracts'
 import { ApprovalError, verifyApproval } from '@/lib/approval'
 import { codePoints } from '@/lib/hash'
@@ -91,6 +91,10 @@ async function handlePOST(req: Request) {
       return json(f.body, f.status, f.retryAfter ? { 'retry-after': String(f.retryAfter) } : {})
     }
     if ((e as Error).name === 'AbortError') return json({ error: 'cancelled' }, 499)
+    if (isNetworkFailure(e)) {
+      logEvent({ evt: 'tts', status: 0, code: 'provider_unreachable' })
+      return json({ error: 'speech_provider_unreachable', retryable: true, message: 'The speech provider could not be reached. Nothing was spoken. Please try again.' }, 502)
+    }
     throw e
   }
 }
