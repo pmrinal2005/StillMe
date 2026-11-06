@@ -8,6 +8,7 @@ import {
   libraryVoicesFor,
   clonedVoiceUsable,
   consentExpiry,
+  fallbackVoiceFor,
   isLibraryVoice,
   type ClonedVoiceProfile,
 } from '@/lib/voices'
@@ -167,7 +168,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
     voiceId: '', label: '', ownerName: '', recordingLanguage: 'english' as OutputLanguage,
     provenance: 'self-recorded' as ClonedVoiceProfile['provenance'], provenanceNote: '',
     speakerConsent: false, rightsConfirmed: false, biometricTermsAccepted: false,
-    fallbackVoiceId: 'aai-audrey', qualityChecked: false, region,
+    fallbackVoiceId: fallbackVoiceFor('english'), qualityChecked: false, region,
   })
   const [err, setErr] = useState<string | null>(null)
   const set = (p: Partial<typeof f>) => setF((x) => ({ ...x, ...p }))
@@ -239,7 +240,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
             <input className="rv-input" maxLength={300} value={f.provenanceNote} onChange={(e) => set({ provenanceNote: e.target.value })} />
           </label>
           <label className="grid">Recording language
-            <select className="rv-input" value={f.recordingLanguage} onChange={(e) => set({ recordingLanguage: e.target.value as OutputLanguage })}>
+            <select className="rv-input" value={f.recordingLanguage} onChange={(e) => { const l = e.target.value as OutputLanguage; set({ recordingLanguage: l, fallbackVoiceId: fallbackVoiceFor(l, f.fallbackVoiceId) }) }}>
               {OUTPUT_LANGUAGES.map((l) => <option key={l} value={l}>{OUTPUT_LANGUAGE_LABELS[l]}</option>)}
             </select>
           </label>

@@ -27,6 +27,7 @@ from .approval import ApprovalRejected, Expectation, MemoryReplayStore, SpeakCon
 from .config import (
     MAX_SPOKEN_CHARS,
     OUTPUT_LANGUAGES,
+    CALL_CONNECT_TIMEOUT_S,
     PHONE_PAIR_TIMEOUT_S,
     STT_MODEL,
     TTS_MODEL,
@@ -878,35 +879,45 @@ async def run_call_room(ctx: Any, env: Any) -> None:
         log_event(evt="phone_disabled")
         await ctx.delete_room()
         return
-    caller = await asyncio.wait_for(ctx.wait_for_participant(kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP), timeout=30)
-    source = rtc.AudioSource(TTS_SAMPLE_RATE, 1)
-    track = rtc.LocalAudioTrack.create_audio_track("revoice-prompt", source)
-    await ctx.room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
-    tts = assemblyai.TTS(api_key=env.assembly_key, voice=PHONE_PROMPT_VOICE, language="english", model=TTS_MODEL, word_timestamps=False, base_url=env.tts_base_url)
-
-    async def say(text: str) -> None:  # fixed system prompts only, library voice
-        try:
-            async with tts.synthesize(text) as s:
-                async for ev in s:
-                    await source.capture_frame(ev.frame)
-            await source.wait_for_playout()
-        except Exception:  # noqa: BLE001
-            pass
-
-    collector = DtmfCollector()
-    codes: asyncio.Queue[str] = asyncio.Queue()
-
-    def on_dtmf(ev: Any) -> None:
-        if ev.participant is None or ev.participant.identity != caller.identity:
-            return
-        code = collector.push(ev.digit)
-        if code:
-            codes.put_nowait(code)
-
-    ctx.room.on("sip_dtmf_received", on_dtmf)
-    await say(PHONE_PROMPT)
-    deadline = time.monotonic() + PHONE_PAIR_TIMEOUT_S
+    tts: Any = None
+    # D #45: EVERYTHING after this point is inside the try/finally. The wait for the caller used to sit above it, so when
+    # nobody connected within CALL_CONNECT_TIMEOUT_S the TimeoutError escaped before cleanup began, the job crashed and the
+    # call room was never deleted (it lingered, and a late caller could be dropped into an unattended room).
     try:
+        try:
+            caller = await asyncio.wait_for(
+                ctx.wait_for_participant(kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP), timeout=CALL_CONNECT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            log_event(evt="phone_no_caller", seconds=CALL_CONNECT_TIMEOUT_S)
+            return  # the finally below deletes the call room
+        source = rtc.AudioSource(TTS_SAMPLE_RATE, 1)
+        track = rtc.LocalAudioTrack.create_audio_track("revoice-prompt", source)
+        await ctx.room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+        tts = assemblyai.TTS(api_key=env.assembly_key, voice=PHONE_PROMPT_VOICE, language="english", model=TTS_MODEL, word_timestamps=False, base_url=env.tts_base_url)
+
+        async def say(text: str) -> None:  # fixed system prompts only, library voice
+            try:
+                async with tts.synthesize(text) as s:
+                    async for ev in s:
+                        await source.capture_frame(ev.frame)
+                await source.wait_for_playout()
+            except Exception:  # noqa: BLE001
+                pass
+
+        collector = DtmfCollector()
+        codes: asyncio.Queue[str] = asyncio.Queue()
+
+        def on_dtmf(ev: Any) -> None:
+            if ev.participant is None or ev.participant.identity != caller.identity:
+                return
+            code = collector.push(ev.digit)
+            if code:
+                codes.put_nowait(code)
+
+        ctx.room.on("sip_dtmf_received", on_dtmf)
+        await say(PHONE_PROMPT)
+        deadline = time.monotonic() + PHONE_PAIR_TIMEOUT_S
         while not collector.exhausted or not codes.empty():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -934,8 +945,16 @@ async def run_call_room(ctx: Any, env: Any) -> None:
             await say("That code was not accepted. Please try again." if not collector.exhausted else "Sorry, pairing failed. Goodbye.")
         await ctx.api.room.remove_participant(api.RoomParticipantIdentity(room=ctx.room.name, identity=caller.identity))
     finally:
-        await tts.aclose()
-        await ctx.delete_room()
+        # Each cleanup step is independent: a failing TTS close must not stop the room from being deleted.
+        if tts is not None:
+            try:
+                await tts.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await ctx.delete_room()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # --------------------------------------------------------------------------- entrypoint

@@ -15,7 +15,7 @@ const LABEL: Record<OAuthProvider, string> = { github: 'GitHub', google: 'Google
  *    and library-voice speech keep working; this component just labels it.
  *  - OAuth/email redirect errors (?error_description=…) are shown as a readable alert, then cleared.
  */
-export function AuthControls({ needsSignIn, status }: { needsSignIn: boolean; status: StatusResponse | null }) {
+export function AuthControls({ needsSignIn, status, onBeforeSignOut }: { needsSignIn: boolean; status: StatusResponse | null; onBeforeSignOut?: () => Promise<void> }) {
   const sb = getSupabase()
   const [providers, setProviders] = useState<AuthProviders | null>(null)
   const [open, setOpen] = useState(false)
@@ -43,7 +43,19 @@ export function AuthControls({ needsSignIn, status }: { needsSignIn: boolean; st
   const kind = status?.identity.kind
   if (kind === 'supabase') {
     return (
-      <button className="rv-btn text-sm" onClick={() => void sb.auth.signOut()}>
+      <button
+        className="rv-btn text-sm"
+        onClick={() => {
+          // D #36: end the listening session FIRST (it needs the still-valid token to settle its minutes and close the
+          // room), clear the ticket, then drop the session. Signing out used to leave the billed session running.
+          void (async () => {
+            try {
+              await onBeforeSignOut?.()
+            } catch {}
+            await sb.auth.signOut()
+          })()
+        }}
+      >
         <Icon name="logout" size={15} /> Sign out
       </button>
     )

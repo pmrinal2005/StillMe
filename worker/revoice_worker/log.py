@@ -8,7 +8,7 @@ import time
 
 _ALLOWED = {
     "evt", "attempt", "chars", "billed", "req", "tokens", "status", "reason", "ms", "room", "voice",
-    "kind", "code", "provider", "minutes", "usd", "generation", "turn", "revision",
+    "kind", "code", "provider", "minutes", "usd", "generation", "turn", "revision", "seconds",
 }
 _log = logging.getLogger("revoice.events")
 

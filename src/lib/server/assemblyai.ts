@@ -18,6 +18,7 @@ export interface TtsResult {
   body: ReadableStream<Uint8Array>
   headers: Headers
   billedChars?: number
+  /** D #38: provider-reported voice consent expiry in EPOCH MILLISECONDS (the provider header is in seconds). */
   voiceExpiresAt?: number
 }
 
@@ -25,6 +26,52 @@ export class AssemblyError extends Error {
   constructor(public status: number, public code: string, public retryable: boolean, public retryAfter?: number, message?: string) {
     super(message ?? code)
   }
+}
+
+/** Provider error codes that mean "the provider rejected OUR server credentials" (never the visitor's login). */
+const PROVIDER_AUTH_CODES = new Set(['unauthorized', 'unauthenticated', 'forbidden', 'invalid_api_key', 'invalid_token', 'authentication_failed', 'authentication_error', 'permission_denied'])
+
+/** D #37: a provider-supplied error code is only ever shown to the user if it cannot be mistaken for a sign-in problem. */
+export function sanitizeProviderCode(code: string | undefined | null, fallback = 'upstream_error'): string {
+  const c = (code ?? '').toString().trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 48)
+  if (!c || PROVIDER_AUTH_CODES.has(c)) return fallback
+  return c
+}
+
+/**
+ * D #37 — translate an AssemblyAI failure into OUR response.
+ *
+ * Bug: /api/speak passed the provider's own status/code straight through. A bad or expired ASSEMBLYAI_API_KEY reached the
+ * browser as HTTP 401 `unauthorized`, which the UI (and the account layer) read as "you are signed out" — the visitor was
+ * told to sign in for a server-side configuration problem. A provider 429 with an arbitrary code was likewise treated as the
+ * app's own daily-budget pause.
+ *
+ * Now: provider 401/403 (or an auth-shaped code) → 502 `speech_provider_auth` (a server problem, retrying will not help);
+ * 402 → 402 `provider_credit_exhausted`; 429 → 429 `rate_limited` (+ Retry-After); bad voice/text → 422 with a safe code;
+ * everything else → 502. Only OUR routes ever emit 401 (`unauthorized` / `account_required`).
+ */
+export function providerFailure(e: AssemblyError): { status: number; body: { error: string; retryable: boolean; message?: string }; retryAfter?: number } {
+  const authShaped = e.status === 401 || e.status === 403 || PROVIDER_AUTH_CODES.has((e.code ?? '').toLowerCase())
+  if (authShaped) {
+    return { status: 502, body: { error: 'speech_provider_auth', retryable: false, message: 'The speech provider rejected this server\'s credentials. Nothing was spoken. This is a server configuration problem, not a sign-in problem.' } }
+  }
+  if (e.status === 402) return { status: 402, body: { error: 'provider_credit_exhausted', retryable: false, message: 'The speech provider reports no remaining credit. Use the device voice or large text.' } }
+  if (e.status === 429) return { status: 429, body: { error: 'rate_limited', retryable: true }, retryAfter: e.retryAfter }
+  if (e.status === 400 || e.status === 404 || e.status === 413 || e.status === 422) {
+    return { status: 422, body: { error: sanitizeProviderCode(e.code, 'invalid_speech_request'), retryable: false } }
+  }
+  if (e.status === 0 || e.status >= 500 || e.status >= 400) {
+    return { status: 502, body: { error: e.status >= 500 ? sanitizeProviderCode(e.code, 'upstream_error') : 'upstream_error', retryable: e.retryable } }
+  }
+  return { status: 502, body: { error: 'upstream_error', retryable: e.retryable } }
+}
+
+/** The provider reports expiry as epoch SECONDS (X-TTS-Voice-Expires-At). Returns epoch ms, or undefined if absent/implausible. */
+export function parseVoiceExpiryMs(header: string | null | undefined): number | undefined {
+  const n = Number(header)
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  // Seconds today (~1.8e9). Tolerate a provider that already sends milliseconds (>= 1e11) instead of multiplying again.
+  return n >= 1e11 ? Math.round(n) : Math.round(n * 1000)
 }
 
 /**
@@ -72,12 +119,11 @@ export async function synthesizeApproved(opts: {
     throw new AssemblyError(res.status, code, retryable, Number.isFinite(ra) ? ra : undefined)
   }
   const billed = Number(res.headers.get('x-tts-billed-characters'))
-  const exp = Number(res.headers.get('x-tts-voice-expires-at'))
   return {
     body: res.body,
     headers: res.headers,
     billedChars: Number.isFinite(billed) ? billed : undefined,
-    voiceExpiresAt: Number.isFinite(exp) && exp > 0 ? exp : undefined,
+    voiceExpiresAt: parseVoiceExpiryMs(res.headers.get('x-tts-voice-expires-at')), // D #38: seconds → ms
   }
 }
 

@@ -2,7 +2,7 @@ import 'server-only'
 import { adminClient } from './durable'
 import { env } from './env'
 import { randomId } from '../hash'
-import { clonedVoiceUsable, isLibraryVoice, type ClonedVoiceProfile } from '../voices'
+import { adoptProviderExpiry, clonedVoiceUsable, isLibraryVoice, type ClonedVoiceProfile } from '../voices'
 
 /**
  * B11/B12 — SERVER-SIDE cloned-voice registry.
@@ -300,6 +300,18 @@ export async function recordRenewal(store: VoiceStore, userId: string, voiceId: 
   await store.update(userId, p.id, { consentAt: now, providerExpiresAt: providerExpiresAt ?? undefined, speakerConsent: true })
   await store.consent(userId, next, 'renewal', now)
   return next
+}
+
+/**
+ * D #38: store the provider-reported expiry that /api/speak observed. Without this the consent expiry stayed an estimate
+ * (consentAt + 60 days) even though every cloned-voice utterance reports the real date. Only a plausible FUTURE value
+ * that differs from the stored one by more than a minute is written (no write per utterance).
+ */
+export async function persistProviderExpiry(store: VoiceStore, userId: string, profile: ClonedVoiceProfile, expiresAtMs: number | undefined, now = Date.now()): Promise<boolean> {
+  const next = adoptProviderExpiry(profile.providerExpiresAt, expiresAtMs, now)
+  if (next === undefined) return false
+  await store.update(userId, profile.id, { providerExpiresAt: next })
+  return true
 }
 
 export type VoiceAuth =

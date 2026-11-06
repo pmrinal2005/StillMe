@@ -23,6 +23,7 @@
 import type { Approval } from '../contracts'
 import { reduceOutput, type OutputEvent, type OutputState } from '../output-state'
 import type { SpeechRoute } from './worker-presence'
+import { heldApprovalExpired } from '../shortcuts'
 
 export interface PlayerLike {
   unlock(): Promise<void>
@@ -194,7 +195,8 @@ export class SpeechController {
     const h = this.held
     if (!h || this.state.kind !== 'approved_pending_gap') return 'none' as const
     this.held = null
-    if (this.now() - h.at > MAX_HOLD_MS || this.now() > h.approval.exp - 2_000) {
+    // D #40: durations only — `approval.exp` is a SERVER timestamp and must never be compared with this device's clock.
+    if (heldApprovalExpired(h.approval, h.at, this.now(), MAX_HOLD_MS)) {
       this.emit({ type: 'context_changed', reason: 'hold_expired' })
       return 'expired' as const
     }

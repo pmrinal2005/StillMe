@@ -4,12 +4,12 @@ import { durableReplay, recordUsage } from '@/lib/server/durable'
 import { reserveTtsSpend } from '@/lib/server/spend'
 import { logEvent } from '@/lib/server/log'
 import { PRICES } from '@/lib/budget'
-import { AssemblyError, synthesizeApproved } from '@/lib/server/assemblyai'
+import { AssemblyError, providerFailure, synthesizeApproved } from '@/lib/server/assemblyai'
 import { SpeakRequest } from '@/lib/contracts'
 import { ApprovalError, verifyApproval } from '@/lib/approval'
 import { codePoints } from '@/lib/hash'
 import { withJsonErrors } from '@/lib/server/route'
-import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
+import { authorizeVoice, persistProviderExpiry, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -30,9 +30,12 @@ async function handlePOST(req: Request) {
 
   // B11/B12: re-check the voice at SPEAK time (a clone may have been revoked or expired since the approval was
   // signed; approvals live up to 60 s). A signed approval is not a licence to use somebody else's/expired voice.
+  const store = voiceStoreFor(id.userId)
+  let clonedProfile: import('@/lib/voices').ClonedVoiceProfile | null = null
   try {
-    const va = await authorizeVoice(voiceStoreFor(id.userId), id, approval.voiceId, env.assemblyRegion())
+    const va = await authorizeVoice(store, id, approval.voiceId, env.assemblyRegion())
     if (!va.ok) return json({ error: 'voice_not_authorized', reason: va.reason }, 403)
+    if (va.kind === 'cloned') clonedProfile = va.profile
   } catch (e) {
     if (e instanceof VoiceRegistryError) return json({ error: e.code }, e.status)
     throw e
@@ -63,6 +66,8 @@ async function handlePOST(req: Request) {
     })
     const billed = r.billedChars ?? chars
     await spend.commit(billed)
+    // D #38: remember the provider's real consent expiry (best effort — never delays or fails the audio).
+    if (clonedProfile && r.voiceExpiresAt) void persistProviderExpiry(store, id.userId, clonedProfile, r.voiceExpiresAt).catch(() => undefined)
     // Content-free usage log (no text).
     logEvent({ evt: 'tts', attempt: approval.playbackAttemptId, chars, billed: r.billedChars, req: r.headers.get('x-request-id'), ms: Date.now() - t0 })
     void recordUsage({ userId: id.userId, provider: 'assemblyai', kind: 'tts_http', units: billed, estUsd: billed * PRICES.ttsPerChar, requestId: r.headers.get('x-request-id'), durationMs: Date.now() - t0 })
@@ -80,7 +85,10 @@ async function handlePOST(req: Request) {
     await spend.release() // A8: user + project + guest pool + durable
     void recordUsage({ userId: id.userId, provider: 'assemblyai', kind: 'tts_http', errorCategory: e instanceof AssemblyError ? e.code : (e as Error).name })
     if (e instanceof AssemblyError) {
-      return json({ error: e.code, retryable: e.retryable }, e.status === 402 ? 402 : e.status >= 500 ? 502 : e.status, e.retryAfter ? { 'retry-after': String(e.retryAfter) } : {})
+      // D #37: OUR error vocabulary — a provider 401 (bad server key) must never reach the browser as "sign in".
+      const f = providerFailure(e)
+      logEvent({ evt: 'tts', status: e.status, code: f.body.error })
+      return json(f.body, f.status, f.retryAfter ? { 'retry-after': String(f.retryAfter) } : {})
     }
     if ((e as Error).name === 'AbortError') return json({ error: 'cancelled' }, 499)
     throw e

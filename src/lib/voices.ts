@@ -56,6 +56,30 @@ export function libraryVoicesFor(language: OutputLanguage): LibraryVoice[] {
 }
 
 export const DEFAULT_VOICE_ID = 'aai-audrey'
+
+/**
+ * D #39 — the library voice to fall back to for a given OUTPUT language.
+ *
+ * Bug: every fallback was hard-wired to Audrey (English). An unregistered / expired / revoked clone therefore read Spanish
+ * (or German, French, ...) text in an English voice. The preferred fallback (the one the owner chose) is kept only when it
+ * speaks the output language; otherwise the first library voice of that language is used.
+ */
+export function fallbackVoiceFor(language: OutputLanguage, preferredId?: string): string {
+  const pref = preferredId ? LIBRARY_VOICES.find((v) => v.id === preferredId) : undefined
+  if (pref && pref.language === language) return pref.id
+  const own = LIBRARY_VOICES.find((v) => v.language === language)
+  return own?.id ?? DEFAULT_VOICE_ID
+}
+
+/**
+ * D #38 — should a provider-reported voice expiry (epoch ms) replace the stored one? Only a plausible FUTURE date that
+ * differs by more than a minute (so it is not rewritten on every utterance).
+ */
+export function adoptProviderExpiry(current: number | undefined, reported: number | undefined, now = Date.now()): number | undefined {
+  if (!reported || !Number.isFinite(reported) || reported <= now) return undefined
+  if (current !== undefined && Math.abs(current - reported) < 60_000) return undefined
+  return reported
+}
 export const CONSENT_PERIOD_DAYS = 60
 export const CONSENT_REMIND_DAYS = 10
 

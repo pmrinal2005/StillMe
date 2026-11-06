@@ -1,5 +1,6 @@
 import 'server-only'
 import { logEvent } from './log'
+import { authNoteFor, AUTH_NOTE_HEADER } from './auth-note'
 
 /**
  * B7 — JSON error wrapper for EVERY API route.
@@ -40,6 +41,9 @@ export function classifyError(e: unknown): { status: number; error: string; mess
   if (/LiveKit not configured|LIVEKIT_URL not configured/.test(msg)) {
     return { status: 503, error: 'livekit_not_configured', message: 'Listening rooms are not configured on this server.' }
   }
+  if (msg === 'auth_unavailable') {
+    return { status: 503, error: 'auth_unavailable', message: 'The sign-in service is briefly unreachable. Please try again in a moment.' }
+  }
   if (e instanceof SyntaxError) return { status: 400, error: 'invalid_request', message: 'The request body could not be read.' }
   return { status: 500, error: 'internal_error', message: 'Something went wrong on the server. Nothing was spoken. Please try again.' }
 }
@@ -47,17 +51,22 @@ export function classifyError(e: unknown): { status: number; error: string; mess
 export function withJsonErrors<A extends unknown[]>(route: string, handler: RouteHandler<A>): (...args: A) => Promise<Response> {
   return async (...args: A) => {
     const requestId = newRequestId()
-    try {
-      const res = await handler(...args)
-      // Stamp the id where headers are mutable (streams keep theirs if immutable).
+    // D #33/#34: if the caller was served as a guest FALLBACK, say so on every response (client refreshes / tells the user).
+    const stamp = (res: Response) => {
+      // Stamp where headers are mutable (streams keep theirs if immutable).
       try {
         if (!res.headers.has('x-revoice-request-id')) res.headers.set('x-revoice-request-id', requestId)
+        const note = authNoteFor(args[0])
+        if (note) res.headers.set(AUTH_NOTE_HEADER, note)
       } catch {}
       return res
+    }
+    try {
+      return stamp(await handler(...args))
     } catch (e) {
       const c = classifyError(e)
       logEvent({ evt: 'route_error', route, status: c.status, code: c.error, kind: e instanceof Error ? e.name : typeof e, req: requestId })
-      return errorResponse(c.status, c.error, c.message, requestId)
+      return stamp(errorResponse(c.status, c.error, c.message, requestId))
     }
   }
 }

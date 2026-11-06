@@ -11,6 +11,7 @@
 import { Room, RoomEvent, Track, type RemoteParticipant, type LocalTrackPublication } from 'livekit-client'
 import { ControlMessage, DataTopics, StatusMessage, TranscriptMessage, type Approval } from '../contracts'
 import { ownerPlaysLocally, type ConversationMode } from '../audio-routing'
+import { CAPTURE_WORKLET_SRC } from './downsample'
 
 export interface TurnUpdate { turnId: number; text: string; endOfTurn: boolean; /** C #30: source revision stamped by the worker (absent for browser-direct STT) */ revision?: number }
 export interface ListenerEvents {
@@ -154,28 +155,6 @@ export class LiveKitListener {
   }
 }
 
-const WORKLET = `
-class Capture extends AudioWorkletProcessor {
-  constructor(){ super(); this.ratio = sampleRate / 16000; this.buf = []; this.acc = 0; }
-  process(inputs){
-    const ch = inputs[0] && inputs[0][0];
-    if (!ch) return true;
-    for (let i = 0; i < ch.length; i++) {
-      this.acc += 1;
-      if (this.acc >= this.ratio) { this.acc -= this.ratio; this.buf.push(ch[i]); }
-    }
-    if (this.buf.length >= 800) { // 50 ms @ 16 kHz
-      const out = new Int16Array(this.buf.length);
-      for (let i = 0; i < this.buf.length; i++) { const s = Math.max(-1, Math.min(1, this.buf[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-      this.port.postMessage(out.buffer, [out.buffer]);
-      this.buf = [];
-    }
-    return true;
-  }
-}
-registerProcessor('rv-capture', Capture);
-`
-
 export class DirectSttListener {
   private ws: WebSocket | null = null
   private ctx: AudioContext | null = null
@@ -189,7 +168,7 @@ export class DirectSttListener {
     this.ev.onStatus({ state: 'connecting' })
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } })
     this.ctx = new AudioContext()
-    const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }))
+    const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET_SRC], { type: 'application/javascript' }))
     await this.ctx.audioWorklet.addModule(url)
     URL.revokeObjectURL(url)
     const { wsUrl, maxSessionSeconds } = await this.getUrl()

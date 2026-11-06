@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { ttsBase } from '@/lib/server/assemblyai'
+import { parseVoiceExpiryMs, sanitizeProviderCode, ttsBase } from '@/lib/server/assemblyai'
 import { reserveTtsSpend } from '@/lib/server/spend'
 import { OutputLanguage, TTS_MODEL } from '@/lib/contracts'
 import { codePoints } from '@/lib/hash'
@@ -59,12 +59,11 @@ async function handlePOST(req: Request) {
   if (!res.ok) {
     await spend.release() // errors are not billed
     const j = await res.json().catch(() => ({}))
-    return json({ error: j.code ?? 'renew_failed', message: j.message }, res.status === 422 ? 422 : 502)
+    return json({ error: sanitizeProviderCode(j.code, 'renew_failed'), message: res.status === 401 || res.status === 403 ? 'The speech provider rejected this server\'s credentials.' : j.message }, res.status === 422 ? 422 : 502)
   }
   await res.arrayBuffer()
   await spend.commit(Number(res.headers.get('x-tts-billed-characters')) || codePoints(text))
-  const exp = Number(res.headers.get('x-tts-voice-expires-at'))
-  const providerExpiresAt = Number.isFinite(exp) && exp > 0 ? exp * 1000 : null
+  const providerExpiresAt = parseVoiceExpiryMs(res.headers.get('x-tts-voice-expires-at')) ?? null // D #38: shared seconds→ms conversion
   // B11: the renewal is recorded SERVER-side (the registry is the source of truth, not the browser).
   let voice
   try {

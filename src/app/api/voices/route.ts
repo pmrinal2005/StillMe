@@ -1,14 +1,14 @@
 import { z } from 'zod'
 import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { ttsBase } from '@/lib/server/assemblyai'
+import { parseVoiceExpiryMs, ttsBase } from '@/lib/server/assemblyai'
 import { reserveTtsSpend } from '@/lib/server/spend'
 import { allow } from '@/lib/server/rate-limit'
 import { audit } from '@/lib/server/durable'
 import { mayRegisterClone, registerClonedVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { OutputLanguage, TTS_MODEL } from '@/lib/contracts'
 import { codePoints } from '@/lib/hash'
-import { isLibraryVoice } from '@/lib/voices'
+import { fallbackVoiceFor, isLibraryVoice } from '@/lib/voices'
 import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
@@ -20,7 +20,8 @@ const Body = z.object({
   recordingLanguage: OutputLanguage,
   provenance: z.enum(['self-recorded', 'voicemail', 'other-recording']),
   provenanceNote: z.string().max(300).default(''),
-  fallbackVoiceId: z.string().min(1).max(128).default('aai-audrey'),
+  /** D #39: optional — defaults to a library voice that speaks the recording language (not always English). */
+  fallbackVoiceId: z.string().min(1).max(128).optional(),
   qualityChecked: z.literal(true),
   // Affirmative consent: all three must be literally true, recorded by the SERVER with a server timestamp.
   speakerConsent: z.literal(true),
@@ -85,9 +86,10 @@ async function handlePOST(req: Request) {
   }
   await res.arrayBuffer()
   await spend.commit(Number(res.headers.get('x-tts-billed-characters')) || codePoints(text))
-  const exp = Number(res.headers.get('x-tts-voice-expires-at'))
   try {
-    const profile = await registerClonedVoice(store, id.userId, b, { region: env.assemblyRegion(), providerExpiresAt: Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined })
+    // D #39: the default fallback speaks the recording language (an English-only default read Spanish text in Audrey).
+    const fallbackVoiceId = b.fallbackVoiceId ?? fallbackVoiceFor(b.recordingLanguage)
+    const profile = await registerClonedVoice(store, id.userId, { ...b, fallbackVoiceId }, { region: env.assemblyRegion(), providerExpiresAt: parseVoiceExpiryMs(res.headers.get('x-tts-voice-expires-at')) })
     void audit(id.userId, 'voice_registered', profile.id)
     return json({ ok: true, voice: profile })
   } catch (e) {

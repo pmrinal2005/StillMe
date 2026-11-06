@@ -10,7 +10,8 @@ import { logEvent } from '@/lib/server/log'
 import { InputLanguage, OutputLanguage } from '@/lib/contracts'
 import { randomId } from '@/lib/hash'
 import { LIMITS } from '@/lib/budget'
-import { signSessionTicket, usedSttMinutes } from '@/lib/session-ticket'
+import { signSessionTicket, usedSttMinutes, verifySessionTicket } from '@/lib/session-ticket'
+import { planExistingSessions } from '@/lib/session-replace'
 import { withJsonErrors } from '@/lib/server/route'
 
 export const dynamic = 'force-dynamic'
@@ -23,7 +24,10 @@ const Body = z.object({
   keyterms: z.array(z.string().min(1).max(50)).max(30).default([]),
   contextPrompt: z.string().max(300).default(''),
   minutes: z.number().int().min(1).max(LIMITS.assembly.interactiveSessionMinutes).default(LIMITS.assembly.interactiveSessionMinutes),
-  /** Replace an existing active conversation (ends it first). */
+  /**
+   * D #35: explicit consent to END a conversation this device does not hold (e.g. one running on another device).
+   * A stale session whose ticket this device presents is replaced without it.
+   */
   replace: z.boolean().default(false),
   /** Ticket of the session being replaced (lets any instance settle its reservation — B3/B4). */
   ticket: z.string().max(2000).optional(),
@@ -64,14 +68,24 @@ async function handlePOST(req: Request) {
 
   // ---- one active conversation per user — checked against LiveKit (B4), not just this instance's memory
   try {
-    const existing = new Set<string>()
+    const found = new Set<string>()
     const cached = activeSession(id.userId)
-    if (cached) existing.add(cached.room)
-    for (const r of await listOwnerRooms(id.userId)) existing.add(r.room)
-    if (existing.size) {
-      if (!b.replace) return json({ error: 'session_active', room: [...existing][0] }, 409)
-      for (const room of existing) await closeExisting(id.userId, room, priorTicket)
+    if (cached) found.add(cached.room)
+    for (const r of await listOwnerRooms(id.userId)) found.add(r.room)
+    // D #35: which of them does THIS device hold (valid signed ticket for that exact room)? Those are its own stale
+    // sessions. Anything else is another device's live session: refuse unless the caller explicitly consents.
+    const existing = await Promise.all(
+      [...found].map(async (room) => ({
+        room,
+        mine: priorTicket ? (await verifySessionTicket(env.approvalSecret(), priorTicket, { sub: id.userId, room, allowExpired: true })).ok : false,
+      })),
+    )
+    const plan = planExistingSessions(existing, b.replace)
+    if (plan.action === 'conflict') {
+      logEvent({ evt: 'session_start', status: 'denied', reason: 'session_active' })
+      return json({ error: 'session_active', room: plan.room, otherDevice: plan.otherDevice, message: 'You already have a listening session running (on another device or in an earlier tab). Starting here will end it.' }, 409)
     }
+    if (plan.action === 'replace') for (const room of plan.rooms) await closeExisting(id.userId, room, priorTicket)
   } catch (e) {
     logEvent({ evt: 'session_start', status: 'error', reason: 'livekit_unreachable', detail: (e as Error).message?.slice(0, 120) })
     return json({ error: 'livekit_unreachable', message: 'Could not reach LiveKit. Typing and phrases still work.' }, 502)

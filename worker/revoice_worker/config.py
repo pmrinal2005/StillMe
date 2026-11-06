@@ -43,6 +43,8 @@ IDLE_NO_AUDIO_S = 5 * 60
 PHONE_MONTHLY_MINUTES_CAP = 40
 PHONE_MAX_CALL_MINUTES = 15
 PHONE_PAIR_TIMEOUT_S = 60
+# D #45: how long a freshly dispatched call room waits for the SIP caller to appear before it is torn down.
+CALL_CONNECT_TIMEOUT_S = 30
 
 
 def _opt(name: str) -> str | None:

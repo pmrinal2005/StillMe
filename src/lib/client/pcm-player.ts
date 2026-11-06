@@ -4,8 +4,31 @@
  * - Starts playback on the first chunk (no waiting for the whole clip).
  * - Stop(): silences immediately, clears queued audio, and rejects late chunks from that attempt.
  * - Carries odd bytes across network reads (the network may split samples).
+ * - D #43: samples are decoded with a DataView, so a chunk that starts at an ODD byte offset (a network read slice, a
+ *   subarray) can no longer make `new Int16Array(buffer, byteOffset, ...)` throw a RangeError and kill playback.
+ * - D #43: the list of cancelled attempts is bounded (it used to grow for the life of the page).
  * Raw PCM is never handed to an <audio> element or mislabelled as MP3.
  */
+/**
+ * Decode little-endian signed 16-bit PCM into floats in [-1, 1). Alignment-safe: reads through a DataView with the
+ * chunk's own byteOffset, so ANY start offset works (an Int16Array view needs an even byteOffset and throws otherwise).
+ */
+export function decodePcm16le(bytes: Uint8Array, out: Float32Array): number {
+  const n = Math.min(Math.floor(bytes.length / 2), out.length)
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  for (let i = 0; i < n; i++) out[i] = dv.getInt16(i * 2, true) / 32768
+  return n
+}
+
+/** Keep a Set's most recently inserted `max` entries (Sets iterate in insertion order). */
+export function trimOldest<T>(set: Set<T>, max: number): void {
+  while (set.size > max) {
+    const first = set.values().next()
+    if (first.done) return
+    set.delete(first.value)
+  }
+}
+
 export class PcmStreamPlayer {
   private ctx: AudioContext | null = null
   private gain: GainNode | null = null
@@ -14,6 +37,8 @@ export class PcmStreamPlayer {
   private carry: Uint8Array | null = null
   private activeAttempt: string | null = null
   private cancelled = new Set<string>()
+  /** D #43: only the most recent cancelled attempts matter (late frames arrive within seconds). */
+  static readonly MAX_CANCELLED = 32
   public onFirstAudio?: (attemptId: string, atMs: number) => void
   private firstFired = false
 
@@ -53,10 +78,10 @@ export class PcmStreamPlayer {
       bytes = bytes.slice(0, bytes.length - 1)
     }
     if (bytes.length === 0) return
-    const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
-    const buf = this.ctx.createBuffer(1, samples.length, sampleRate)
+    const n = bytes.length / 2
+    const buf = this.ctx.createBuffer(1, n, sampleRate)
     const ch = buf.getChannelData(0)
-    for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 32768
+    decodePcm16le(bytes, ch)
     const src = this.ctx.createBufferSource()
     src.buffer = buf
     src.connect(this.gain)
@@ -80,7 +105,10 @@ export class PcmStreamPlayer {
   }
 
   stop() {
-    if (this.activeAttempt) this.cancelled.add(this.activeAttempt)
+    if (this.activeAttempt) {
+      this.cancelled.add(this.activeAttempt)
+      trimOldest(this.cancelled, PcmStreamPlayer.MAX_CANCELLED)
+    }
     if (this.gain && this.ctx) this.gain.gain.setValueAtTime(0, this.ctx.currentTime)
     for (const s of this.sources) {
       try { s.stop() } catch {}

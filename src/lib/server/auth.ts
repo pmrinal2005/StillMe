@@ -1,8 +1,9 @@
 import 'server-only'
 import { cookies } from 'next/headers'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js'
 import { env } from './env'
-import { hmacSha256Hex, randomId, timingSafeEqualHex } from '../hash'
+import { hmacSha256Hex, randomId, sha256Hex, timingSafeEqualHex } from '../hash'
+import { EXPECT_ACCOUNT_HEADER, setAuthNote, type AuthNote } from './auth-note'
 
 export interface Identity {
   userId: string
@@ -20,6 +21,8 @@ export interface Identity {
    *                with much smaller budgets; listening, cloned voices, phone and reconciliation are refused.
    */
   kind: 'supabase' | 'local-demo' | 'guest'
+  /** D #33/#34: this guest identity is a FALLBACK for a caller that expected an account (see auth-note.ts). */
+  note?: AuthNote
 }
 
 const DEMO_COOKIE = 'rv_demo'
@@ -43,34 +46,153 @@ async function signedDeviceIdentity(cookieName: string, label: string, prefix: s
   return { userId: `${prefix}-${id}`, kind }
 }
 
+// ------------------------------------------------------------------------------------------------ token verification
+/**
+ * D #32 — ONE Supabase client for the whole instance and a short verification cache.
+ *
+ * Bug: every API call (speak, approve, suggest and the 20 s status poll) built a NEW Supabase client and asked the Auth
+ * server to validate the token (`getUser`) — one extra network round-trip on the speech path.
+ *
+ * Now a verified token is remembered for TOKEN_CACHE_TTL_MS (never past the JWT's own expiry; keyed by SHA-256 of the
+ * token so the raw bearer is never stored), concurrent requests share one in-flight check, and if the Auth server is
+ * briefly unreachable a token that WAS verified before is still honoured until it expires (stale-if-error) instead of
+ * demoting the user to a guest. Cost: a sign-out/revocation is honoured server-side within TOKEN_CACHE_TTL_MS.
+ */
+export const TOKEN_CACHE_TTL_MS = 30_000
+const TOKEN_CACHE_MAX = 500
+const EXPIRY_MARGIN_MS = 5_000
+
+interface CacheEntry {
+  user: User
+  /** Serve without asking Supabase until here. */
+  fresh: number
+  /** Serve only if Supabase is unreachable, until here (the JWT's own expiry). */
+  stale: number
+}
+const tokenCache = new Map<string, CacheEntry>()
+const inflight = new Map<string, Promise<TokenVerdict>>()
+let verifier: { key: string; client: SupabaseClient } | undefined
+
+export type TokenVerdict = { status: 'ok'; user: User } | { status: 'invalid' } | { status: 'unavailable' }
+
+/** `exp` of a JWT in ms (unverified — only used to bound the cache of a token Supabase already accepted). */
+export function jwtExpiryMs(token: string): number | null {
+  try {
+    const part = token.split('.')[1]
+    if (!part) return null
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='))
+    const exp = Number((JSON.parse(json) as { exp?: unknown }).exp)
+    return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null
+  } catch {
+    return null
+  }
+}
+
+/** Transient (Supabase down / rate limited / network) vs. a token Supabase actually rejected. */
+export function isRetryableAuthError(e: { name?: string; status?: number } | null | undefined): boolean {
+  if (!e) return false
+  if (e.name === 'AuthRetryableFetchError') return true
+  const s = e.status
+  return typeof s === 'number' && (s === 0 || s === 429 || s >= 500)
+}
+
+function verifierClient(url: string, anon: string): SupabaseClient {
+  const key = `${url}|${anon}`
+  if (verifier?.key !== key) verifier = { key, client: createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } }) }
+  return verifier.client
+}
+
+async function checkWithSupabase(url: string, anon: string, token: string, cacheKey: string): Promise<TokenVerdict> {
+  let res: Awaited<ReturnType<SupabaseClient['auth']['getUser']>>
+  try {
+    res = await verifierClient(url, anon).auth.getUser(token)
+  } catch {
+    return staleOr(cacheKey)
+  }
+  if (res.error || !res.data.user) {
+    if (isRetryableAuthError(res.error)) return staleOr(cacheKey)
+    tokenCache.delete(cacheKey)
+    return { status: 'invalid' }
+  }
+  const now = Date.now()
+  const stale = (jwtExpiryMs(token) ?? now + TOKEN_CACHE_TTL_MS) - EXPIRY_MARGIN_MS
+  if (stale > now) {
+    if (tokenCache.size >= TOKEN_CACHE_MAX) {
+      const oldest = tokenCache.keys().next().value
+      if (oldest !== undefined) tokenCache.delete(oldest)
+    }
+    tokenCache.set(cacheKey, { user: res.data.user, fresh: Math.min(now + TOKEN_CACHE_TTL_MS, stale), stale })
+  }
+  return { status: 'ok', user: res.data.user }
+}
+
+function staleOr(cacheKey: string): TokenVerdict {
+  const e = tokenCache.get(cacheKey)
+  return e && Date.now() < e.stale ? { status: 'ok', user: e.user } : { status: 'unavailable' }
+}
+
+export async function verifyAccessToken(url: string, anon: string, token: string): Promise<TokenVerdict> {
+  const cacheKey = await sha256Hex(token)
+  const hit = tokenCache.get(cacheKey)
+  if (hit && Date.now() < hit.fresh) return { status: 'ok', user: hit.user }
+  const pending = inflight.get(cacheKey)
+  if (pending) return pending
+  const p = checkWithSupabase(url, anon, token, cacheKey).finally(() => inflight.delete(cacheKey))
+  inflight.set(cacheKey, p)
+  return p
+}
+
+/** Drop every cached verification of this user (account deletion, tests). */
+export function evictAuthCache(userId?: string): void {
+  if (!userId) return tokenCache.clear()
+  for (const [k, e] of tokenCache) if (e.user.id === userId) tokenCache.delete(k)
+}
+
+async function identityFromUser(u: User): Promise<Identity | null> {
+  // B14: Supabase ANONYMOUS sign-in is a guest, never a full account. It used to get full budgets, listening,
+  // cloned voices, phone and reconciliation. Its pseudo id carries the `guest-` prefix so every guest ledger,
+  // the shared guest pool and the durable guest subject (IP-keyed) apply, and it can't collide with a real uuid.
+  if (isAnonymousSupabaseUser(u)) {
+    if (!guestModeEnabled()) return null
+    const pseudo = (await hmacSha256Hex(env.approvalSecret(), `anon-guest:${u.id}`)).slice(0, 24)
+    return { userId: `guest-anon-${pseudo}`, kind: 'guest', anonymous: true, authUserId: u.id }
+  }
+  return { userId: u.id, email: u.email ?? undefined, emailVerified: !!u.email_confirmed_at, kind: 'supabase' }
+}
+
+/** Guest fallback that is LABELLED, so the client can recover or tell the user (D #33/#34). */
+async function labelledGuest(req: Request, note: AuthNote): Promise<Identity> {
+  setAuthNote(req, note)
+  return { ...(await signedDeviceIdentity(GUEST_COOKIE, 'guest', 'guest', 'guest')), note }
+}
+
 /**
  * Resolve the authenticated caller.
- * - If Supabase is configured, a valid Supabase access token (Authorization: Bearer) is REQUIRED.
- * - Otherwise (local prototype without Supabase) we issue an HMAC-signed device cookie so that
- *   approvals are still bound to a stable identity. This mode is labelled in the UI.
+ * - Supabase configured + valid access token (Authorization: Bearer) → that account (verified once per TTL, see above).
+ * - Supabase configured + NO token → capped guest. If the browser says it expected an account
+ *   (`x-revoice-expect-account`) the guest is labelled `missing_token` instead of silently demoting a signed-in user (D #33).
+ * - Supabase configured + INVALID/expired token → capped guest labelled `invalid_token` (D #34: it used to be a hard
+ *   401 that broke even guest features until the user signed in again). Auth server unreachable → `auth_unavailable`.
+ *   With REVOICE_GUEST_MODE=false there is no guest to fall back to: invalid → null (401), unavailable → throws (503).
+ * - Otherwise (local prototype without Supabase) an HMAC-signed device cookie, labelled in the UI.
  */
 export async function getIdentity(req: Request): Promise<Identity | null> {
   const url = env.supabaseUrl()
   const anon = env.supabaseAnon()
   if (url && anon) {
     const auth = req.headers.get('authorization') ?? ''
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-    // B8: no session at all → capped guest identity (typing + library-voice speech still work).
-    // An INVALID/expired token still returns null (401) so the client refreshes instead of silently downgrading.
-    if (!token) return guestModeEnabled() ? signedDeviceIdentity(GUEST_COOKIE, 'guest', 'guest', 'guest') : null
-    const sb = createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } })
-    const { data, error } = await sb.auth.getUser(token)
-    if (error || !data.user) return null
-    const u = data.user
-    // B14: Supabase ANONYMOUS sign-in is a guest, never a full account. It used to get full budgets, listening,
-    // cloned voices, phone and reconciliation. Its pseudo id carries the `guest-` prefix so every guest ledger,
-    // the shared guest pool and the durable guest subject (IP-keyed) apply, and it can't collide with a real uuid.
-    if (isAnonymousSupabaseUser(u)) {
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+    if (!token) {
       if (!guestModeEnabled()) return null
-      const pseudo = (await hmacSha256Hex(env.approvalSecret(), `anon-guest:${u.id}`)).slice(0, 24)
-      return { userId: `guest-anon-${pseudo}`, kind: 'guest', anonymous: true, authUserId: u.id }
+      return req.headers.get(EXPECT_ACCOUNT_HEADER) === '1' ? labelledGuest(req, 'missing_token') : signedDeviceIdentity(GUEST_COOKIE, 'guest', 'guest', 'guest')
     }
-    return { userId: u.id, email: u.email ?? undefined, emailVerified: !!u.email_confirmed_at, kind: 'supabase' }
+    const v = await verifyAccessToken(url, anon, token)
+    if (v.status === 'ok') return identityFromUser(v.user)
+    if (!guestModeEnabled()) {
+      if (v.status === 'unavailable') throw new Error('auth_unavailable')
+      return null
+    }
+    return labelledGuest(req, v.status === 'invalid' ? 'invalid_token' : 'auth_unavailable')
   }
   return signedDeviceIdentity(DEMO_COOKIE, 'demo', 'demo', 'local-demo')
 }

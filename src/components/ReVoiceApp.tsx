@@ -25,7 +25,8 @@ import { PhonePanel } from './PhonePanel'
 import { ReconcilePanel } from './ReconcilePanel'
 import { Icon, type IconName } from './ui/Icon'
 import { Backdrop, Logo, Orb, type OrbState } from './ui/Orb'
-import { api, ApiError, getSessionTicket, setSessionTicket, type StatusResponse } from '@/lib/client/api'
+import { api, ApiError, getSessionTicket, onAuthProblem, setSessionTicket, type StatusResponse } from '@/lib/client/api'
+import { ctrlEnterAction, elapsedMinutes } from '@/lib/shortcuts'
 import { db, getCachedAudio, putCachedAudio } from '@/lib/client/db'
 import { PcmStreamPlayer } from '@/lib/client/pcm-player'
 import { FALLBACK_REJECTIONS, SpeechController, type SpeakSource } from '@/lib/client/speech'
@@ -44,7 +45,7 @@ import { CALLS_PER_TURN, finalRetryDelayMs, isRetryableSuggestError, SuggestionG
 import { partnerIsSpeaking, type OutputState } from '@/lib/output-state'
 import { CandidateSet as CandidateSetSchema, INPUT_LANGUAGES, type Candidate, type CandidateSet, type TurnRef } from '@/lib/contracts'
 import { randomId, sha256Hex } from '@/lib/hash'
-import { clonedVoiceUsable, isLibraryVoice, LIBRARY_VOICES, type ClonedVoiceProfile } from '@/lib/voices'
+import { adoptProviderExpiry, clonedVoiceUsable, fallbackVoiceFor, isLibraryVoice, LIBRARY_VOICES, type ClonedVoiceProfile } from '@/lib/voices'
 import { OUTPUT_BCP47 } from '@/lib/languages'
 
 type Tab = 'session' | 'voice' | 'settings' | 'bank' | 'privacy' | 'metrics'
@@ -87,6 +88,8 @@ export function ReVoiceApp() {
   const [confirming, setConfirming] = useState<{ text: string; cacheable: boolean; speakNow: boolean } | null>(null)
   const [largeText, setLargeText] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  // D #42: the session minute counter used to be recomputed only when something else re-rendered the screen.
+  const [clock, setClock] = useState(() => Date.now())
 
   // partner input
   const [turns, setTurns] = useState<PartnerTurn[]>([])
@@ -153,18 +156,26 @@ export function ReVoiceApp() {
   const voice = useMemo(() => {
     if (isLibraryVoice(prefs.voiceId)) return { id: prefs.voiceId, label: LIBRARY_VOICES.find((v) => v.id === prefs.voiceId)?.name ?? prefs.voiceId, warning: null as string | null, clone: undefined as ClonedVoiceProfile | undefined }
     const c = clones.find((v) => v.voiceId === prefs.voiceId)
-    if (!c) return { id: 'aai-audrey', label: 'Audrey (fallback)', warning: 'Selected voice not registered — using fallback', clone: undefined }
+    // D #39: the fallback must speak the OUTPUT language (it used to be Audrey/English for every language).
+    if (!c) {
+      const fbId = fallbackVoiceFor(prefs.outputLanguage)
+      const fbName = LIBRARY_VOICES.find((v) => v.id === fbId)?.name ?? fbId
+      return { id: fbId, label: `${fbName} (fallback)`, warning: 'Selected voice not registered — using fallback', clone: undefined }
+    }
     const u = clonedVoiceUsable(c, region)
     if (!u.ok) {
-      const fb = LIBRARY_VOICES.find((v) => v.id === c.fallbackVoiceId)
-      return { id: c.fallbackVoiceId, label: `${fb?.name ?? c.fallbackVoiceId} (fallback)`, warning: `“${c.label}” disabled (${u.reason.replace(/_/g, ' ')}) — using your chosen fallback voice`, clone: undefined }
+      const fbId = fallbackVoiceFor(prefs.outputLanguage, c.fallbackVoiceId)
+      const fb = LIBRARY_VOICES.find((v) => v.id === fbId)
+      return { id: fbId, label: `${fb?.name ?? fbId} (fallback)`, warning: `“${c.label}” disabled (${u.reason.replace(/_/g, ' ')}) — using your chosen fallback voice`, clone: undefined }
     }
     return { id: c.voiceId, label: `${c.label} (synthetic clone)`, warning: u.remindRenewal ? `Consent for “${c.label}” expires ${new Date(u.expiresAt).toLocaleDateString()} — renew in Voice` : null, clone: c }
-  }, [prefs.voiceId, clones, region])
+  }, [prefs.voiceId, prefs.outputLanguage, clones, region])
   const voiceRef = useRef(voice)
   voiceRef.current = voice
 
   const reloadClones = useCallback(async () => setClones(await db.voices.toArray()), [])
+  const reloadClonesRef = useRef(reloadClones)
+  reloadClonesRef.current = reloadClones
   useEffect(() => { reloadClones() }, [reloadClones])
 
   // ---------------------------------------------------------------- status & connectivity
@@ -182,7 +193,13 @@ export function ReVoiceApp() {
     refreshStatus()
     const t = setInterval(refreshStatus, 20_000)
     const sb = getSupabase()
-    const sub = sb?.auth.onAuthStateChange(() => refreshStatus())
+    const sub = sb?.auth.onAuthStateChange((event) => {
+      // D #36: signing out (here, in another tab, or because the session died) must not leave a billed listening
+      // session running with no account behind it. The explicit Sign out button ends it BEFORE the token is dropped
+      // (so the server can settle it); this is the safety net for every other way of becoming signed out.
+      if (event === 'SIGNED_OUT' && sessionRef.current) void endSessionRef.current?.('user')
+      refreshStatus()
+    })
     const on = () => setOnline(navigator.onLine)
     on()
     window.addEventListener('online', on)
@@ -194,6 +211,26 @@ export function ReVoiceApp() {
       window.removeEventListener('offline', on)
     }
   }, [refreshStatus])
+
+  // D #33/#34: the API layer recovers a rejected/missing token by itself; when it cannot, say so instead of silently
+  // running on guest limits.
+  useEffect(
+    () =>
+      onAuthProblem((p) => {
+        if (p.kind === 'expired') setNotice('Your sign-in expired and could not be renewed, so you were signed out. Typing, phrases and library voices still work as a guest. Sign in again for listening sessions and your cloned voices.')
+        else if (p.kind === 'missing') setNotice('Your sign-in could not be read just now, so this request ran with guest limits. Try again in a moment, or sign in again.')
+        else setNotice('The sign-in service is briefly unreachable, so this request ran with guest limits. Try again in a moment.')
+      }),
+    [],
+  )
+
+  const sessionActive = !!session
+  useEffect(() => {
+    if (!sessionActive) return
+    setClock(Date.now())
+    const t = setInterval(() => setClock(Date.now()), 15_000)
+    return () => clearInterval(t)
+  }, [sessionActive])
 
   // iOS/Safari audio unlock on first gesture
   useEffect(() => {
@@ -231,7 +268,20 @@ export function ReVoiceApp() {
         )
         return r.approval
       },
-      directStream: (approval, text, signal) => api.speakStream(approval, text, signal),
+      directStream: async (approval, text, signal) => {
+        const r = await api.speakStream(approval, text, signal)
+        // D #38: the provider reports the real consent expiry on every cloned-voice utterance — keep it (it used to be dropped).
+        if (r.voiceExpiresAt && !isLibraryVoice(approval.voiceId)) {
+          void db.voices.where('voiceId').equals(approval.voiceId).first().then(async (v) => {
+            const next = v ? adoptProviderExpiry(v.providerExpiresAt, r.voiceExpiresAt) : undefined
+            if (v && next !== undefined) {
+              await db.voices.update(v.id, { providerExpiresAt: next })
+              await reloadClonesRef.current?.()
+            }
+          }).catch(() => undefined)
+        }
+        return r
+      },
       room: null,
       player: playerRef.current!,
       cache: {
@@ -544,12 +594,13 @@ export function ReVoiceApp() {
         else stop()
       } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
-        void doSpeak(composer)
+        // D #41: inert while the confirmation dialog is open (it used to bypass the confirmation and request twice).
+        if (ctrlEnterAction({ confirming: !!confirming, text: composer, requestInFlight: output.kind === 'speaking' }) === 'speak') void doSpeak(composer)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [stop, doSpeak, composer, largeText, confirming])
+  }, [stop, doSpeak, composer, largeText, confirming, output.kind])
 
   // Partner coaching presence ("composing…", never the draft content).
   const onComposerChange = (v: string) => {
@@ -683,7 +734,21 @@ export function ReVoiceApp() {
     const inputLanguages = prefs.inputLanguages.filter((c): c is (typeof INPUT_LANGUAGES)[number] => (INPUT_LANGUAGES as readonly string[]).includes(c))
     try {
       if (st?.providers.livekit) {
-        const r = await api.startSession({ mode, voiceId: voice.id, outputLanguage: prefs.outputLanguage, inputLanguages, keyterms: prefs.keyterms, contextPrompt: prefs.contextPrompt, replace: true })
+        // D #35: never end another device's session silently. First try WITHOUT replace; if the server reports a live
+        // session this device does not hold, ask, and only then repeat with replace.
+        const startBody = { mode, voiceId: voice.id, outputLanguage: prefs.outputLanguage, inputLanguages, keyterms: prefs.keyterms, contextPrompt: prefs.contextPrompt }
+        let r: Awaited<ReturnType<typeof api.startSession>>
+        try {
+          r = await api.startSession({ ...startBody, replace: false })
+        } catch (e) {
+          if (!(e instanceof ApiError) || e.code !== 'session_active') throw e
+          const ok = window.confirm('You already have a listening session running (for example on another device). Starting a new one here will END that session. Continue?')
+          if (!ok) {
+            setNotice('Listening was not started: your other session is still running.')
+            return
+          }
+          r = await api.startSession({ ...startBody, replace: true })
+        }
         setSessionTicket(r.ticket) // B4: signed ticket authorizes approve/end on ANY serverless instance
         endedRef.current = null
         trackerRef.current = new TurnTracker(r.conversationId, 0)
@@ -830,7 +895,7 @@ export function ReVoiceApp() {
   const speaking = output.kind === 'speaking'
   const holding = output.kind === 'approved_pending_gap'
   const cloudVoiceDown = !status?.providers.assemblyai || !online || output.kind === 'error'
-  const elapsedMin = session ? Math.floor((Date.now() - session.startedAt) / 60000) : 0
+  const elapsedMin = session ? elapsedMinutes(session.startedAt, clock, session.maxMinutes) : 0
   // B17: invites are single use — the owner mints a fresh one for each additional partner.
   const newPartnerLink = async () => {
     const cur = sessionRef.current
@@ -908,7 +973,7 @@ export function ReVoiceApp() {
                 <p className="rv-muted truncate text-xs font-semibold">Human-gated voice · you approve every word</p>
               </div>
             </div>
-            <AuthControls needsSignIn={needsSignIn} status={status} />
+            <AuthControls needsSignIn={needsSignIn} status={status} onBeforeSignOut={async () => { await endSessionRef.current?.('user'); setSessionTicket(null) }} />
           </header>
 
           <div className="mt-4">
