@@ -391,3 +391,19 @@ ASSEMBLYAI_API_KEY=... REVOICE_BASE_URL=https://stillmee.vercel.app npm run smok
 ASSEMBLYAI_API_KEY=... npm run smoke:worker   # worker plugin TTS -> STT (universal-3-6-pro) -> TurnAdapter on real provider events
 ```
 Last run: smoke:live 37/37, smoke:worker 5/5 (revisions supersede, single final, authoritative transcript).
+
+## E48: phrase-board two-way sync
+
+Phrase boards stay on-device (IndexedDB, works offline) and, when signed in with a real account, sync with Supabase (`phrase_boards`, `phrases` from migration 0005).
+
+- Each board/phrase has `updatedAt` and a soft-delete `deletedAt`, so deletions propagate. Last-writer-wins per row; a tie goes to the cloud copy.
+- Built-in boards use deterministic ids and `updatedAt: 0`. A fresh device never uploads its defaults, so it can't overwrite cloud data, and two devices never duplicate the defaults.
+- Deleting a board tombstones its phrases. A phrase is never uploaded before its board exists in the cloud (foreign key).
+- `uses` is a counter. It merges as max() and never counts as an edit.
+- A local edit made while a sync is running is kept (race guard), then uploaded on the next pass.
+- Cloud rows are validated before use. Timestamps are clamped against future clock skew.
+- Failures show in the Phrase boards panel with a Retry button. Free-tier caps (40 boards, 600 phrases) give a clear message.
+- The Dexie v3 upgrade re-keys legacy boards and phrases to real UUIDs and stamps user content.
+- Code: `src/lib/phrase-sync.ts` (pure logic), `src/components/usePhraseSync.ts`, `src/lib/client/db.ts`. Tests: `tests/phrase-sync-e48.test.ts`.
+
+Verification: `npm test` (329), `pytest` in `worker/` (117), `npm run build`, `npm run smoke:live`, `npm run smoke:worker`. The smoke scripts read `ASSEMBLYAI_API_KEY` from the environment only.

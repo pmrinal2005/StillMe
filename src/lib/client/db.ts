@@ -6,9 +6,11 @@
  */
 import Dexie, { type Table } from 'dexie'
 import type { ClonedVoiceProfile } from '../voices'
+import { PHRASE_LIMITS, buildSeed, migrateLegacy, newId, shouldApply, type LBoard, type LPhrase, type PhraseStore, type SyncPlan } from '../phrase-sync'
 
-export interface Board { id: string; name: string; order: number }
-export interface Phrase { id: string; boardId: string; text: string; order: number; uses: number; cacheable?: boolean }
+/** E48: boards/phrases carry `updatedAt` + an optional `deletedAt` tombstone so they can sync two-way (see lib/phrase-sync.ts). */
+export type Board = LBoard
+export type Phrase = LPhrase
 /**
  * Authorized synthesized-audio cache for reusable phrases. Only LIBRARY voices are cached:
  * cloned-voice audio is never cached, so cached clips can never be used to evade the provider's
@@ -44,27 +46,118 @@ class RevoiceDB extends Dexie {
       audioCache: 'key, voiceId, createdAt',
       consentLog: 'id, voiceRecordId, at',
     })
+    // E48: timestamps + tombstones. Old rows (random ids, no timestamps) are re-keyed/stamped by migrateLegacy.
+    this.version(3)
+      .stores({ boards: 'id, order, updatedAt', phrases: 'id, boardId, order, updatedAt' })
+      .upgrade(async (tx) => {
+        const oldBoards = await tx.table('boards').toArray()
+        const oldPhrases = await tx.table('phrases').toArray()
+        const m = migrateLegacy(oldBoards, oldPhrases, Date.now())
+        await tx.table('boards').clear()
+        await tx.table('phrases').clear()
+        await tx.table('boards').bulkPut(m.boards)
+        await tx.table('phrases').bulkPut(m.phrases)
+      })
   }
 }
 
 export const db = new RevoiceDB()
 
-const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2))
+/** Always a real UUID: the cloud `id` columns are uuid, a non-UUID id would make a whole sync batch fail. */
+const uid = newId
 
-const SEED: Record<string, string[]> = {
-  Quick: ['Yes', 'No', 'Please wait, I am typing.', 'I have something to add.', 'Thank you.', 'Could you repeat that?'],
-  Needs: ['I need a break.', 'Can you help me, please?', 'I am uncomfortable.', 'I would like some water.', 'Please call my caregiver.'],
-  Social: ['Hello! Nice to see you.', 'How are you doing?', 'That is funny.', 'Tell me more.', 'Goodbye, talk soon.'],
+/** Seed the built-in boards once. Deterministic ids + updatedAt 0 → two devices' defaults are the same rows (no duplicates) and never overwrite cloud data. */
+export async function ensureSeed() {
+  await db.transaction('rw', db.boards, db.phrases, async () => {
+    if ((await db.boards.count()) > 0) return // includes tombstones: a user who deleted every board must not get the defaults back
+    const s = buildSeed()
+    await db.boards.bulkAdd(s.boards)
+    await db.phrases.bulkAdd(s.phrases)
+  })
 }
 
-export async function ensureSeed() {
-  if ((await db.boards.count()) > 0) return
-  let bi = 0
-  for (const [name, phrases] of Object.entries(SEED)) {
+// ------------------------------------------------------------------------------------------ phrase boards (E48)
+const live = <T extends { deletedAt?: number | null }>(x: T) => !x.deletedAt
+
+export async function listBoards(): Promise<Board[]> {
+  return (await db.boards.orderBy('order').toArray()).filter(live)
+}
+export async function listPhrases(boardId: string): Promise<Phrase[]> {
+  return (await db.phrases.where('boardId').equals(boardId).sortBy('order')).filter(live)
+}
+export type MutationResult = { ok: true; id?: string } | { ok: false; reason: 'empty' | 'too_long' | 'cap' | 'missing' }
+
+export async function addPhraseLocal(boardId: string, rawText: string): Promise<MutationResult> {
+  const text = rawText.trim()
+  if (!text) return { ok: false, reason: 'empty' }
+  if (text.length > PHRASE_LIMITS.phraseText) return { ok: false, reason: 'too_long' }
+  return db.transaction('rw', db.boards, db.phrases, async () => {
+    const board = await db.boards.get(boardId)
+    if (!board || board.deletedAt) return { ok: false as const, reason: 'missing' as const }
+    const all = (await db.phrases.toArray()).filter(live)
+    if (all.length >= PHRASE_LIMITS.maxPhrases) return { ok: false as const, reason: 'cap' as const }
+    const order = all.filter((p) => p.boardId === boardId).reduce((m, p) => Math.max(m, p.order + 1), 0)
     const id = uid()
-    await db.boards.add({ id, name, order: bi++ })
-    await db.phrases.bulkAdd(phrases.map((text, i) => ({ id: uid(), boardId: id, text, order: i, uses: 0 })))
-  }
+    await db.phrases.add({ id, boardId, text, order, uses: 0, updatedAt: Date.now(), deletedAt: null })
+    return { ok: true as const, id }
+  })
+}
+export async function removePhraseLocal(id: string) {
+  const now = Date.now()
+  await db.phrases.update(id, { deletedAt: now, updatedAt: now })
+}
+export async function addBoardLocal(rawName: string): Promise<MutationResult> {
+  const name = rawName.trim()
+  if (!name) return { ok: false, reason: 'empty' }
+  if (name.length > PHRASE_LIMITS.boardName) return { ok: false, reason: 'too_long' }
+  return db.transaction('rw', db.boards, async () => {
+    const all = (await db.boards.toArray()).filter(live)
+    if (all.length >= PHRASE_LIMITS.maxBoards) return { ok: false as const, reason: 'cap' as const }
+    const id = uid()
+    await db.boards.add({ id, name, order: all.reduce((m, b) => Math.max(m, b.order + 1), 0), updatedAt: Date.now(), deletedAt: null })
+    return { ok: true as const, id }
+  })
+}
+/** Soft-delete a board AND its phrases (so other devices learn about every deletion). */
+export async function removeBoardLocal(id: string) {
+  const now = Date.now()
+  await db.transaction('rw', db.boards, db.phrases, async () => {
+    await db.boards.update(id, { deletedAt: now, updatedAt: now })
+    const ps = await db.phrases.where('boardId').equals(id).toArray()
+    for (const p of ps) if (!p.deletedAt) await db.phrases.update(p.id, { deletedAt: now, updatedAt: now })
+  })
+}
+export async function setPhraseCacheable(id: string, cacheable: boolean) {
+  await db.phrases.update(id, { cacheable, updatedAt: Date.now() })
+}
+/** A use is a counter, not an edit: it must NOT bump updatedAt (it would win every conflict against a real edit). */
+export async function bumpPhraseUse(id: string) {
+  await db.phrases.where('id').equals(id).modify((p) => { p.uses = (p.uses ?? 0) + 1 })
+}
+
+/** Dexie-backed store for runPhraseSync. Each merged row is written only if the local row was not edited since it was read. */
+export const dexiePhraseStore: PhraseStore = {
+  async readAll() {
+    const [boards, phrases] = await Promise.all([db.boards.toArray(), db.phrases.toArray()])
+    return { boards, phrases }
+  },
+  async apply(plan: Pick<SyncPlan, 'localBoards' | 'localPhrases' | 'dropLocalPhraseIds'>) {
+    let n = 0
+    await db.transaction('rw', db.boards, db.phrases, async () => {
+      for (const { row, expect } of plan.localBoards) {
+        if (!shouldApply(await db.boards.get(row.id), expect)) continue
+        await db.boards.put(row)
+        n++
+      }
+      for (const { row, expect } of plan.localPhrases) {
+        if (!shouldApply(await db.phrases.get(row.id), expect)) continue
+        await db.phrases.put(row)
+        n++
+      }
+      if (plan.dropLocalPhraseIds.length) await db.phrases.bulkDelete(plan.dropLocalPhraseIds)
+    })
+    return n
+  },
 }
 
 export async function getPref<T>(key: string, fallback: T): Promise<T> {
@@ -83,7 +176,7 @@ export async function exportLocal() {
   return {
     format: 'revoice-local-export-v2',
     exportedAt: new Date().toISOString(),
-    boards, phrases, voices, feedback, prefs, consentLog,
+    boards: boards.filter(live), phrases: phrases.filter(live), voices, feedback, prefs, consentLog,
     bank: bank.map(({ blob: _b, ...m }) => m),
     note: `Message-bank audio blobs and ${cacheCount} cached phrase clip(s) are not included in this JSON export.`,
   }
