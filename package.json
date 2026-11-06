@@ -11,7 +11,8 @@
     "test": "vitest run",
     "scan:secrets": "node scripts/scan-secrets.mjs",
     "postbuild": "node scripts/scan-secrets.mjs",
-    "smoke:live": "node scripts/live-smoke.mjs"
+    "smoke:live": "node scripts/live-smoke.mjs",
+    "smoke:worker": "python3 worker/scripts/live_check.py"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

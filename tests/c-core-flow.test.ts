@@ -31,7 +31,8 @@ function setup(over: Partial<SpeechDeps> = {}) {
   const room = { speak: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
   const deps: SpeechDeps = {
     sha256: sha256Hex,
-    approve: vi.fn(async (text: string) => signed(text)),
+    // Mirrors the app: room approvals are room-bound, direct approvals carry roomName=null (re-signed on fallback).
+    approve: vi.fn(async (text: string, _h: string, _s: unknown, route: 'room' | 'direct') => signed(text, route === 'direct' ? { over: { roomName: undefined } } : {})),
     directStream: vi.fn(async () => ({ body: new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(4)); c.close() } }), sampleRate: 24000 })),
     room,
     route: () => 'room',
@@ -180,6 +181,7 @@ describe('C #30 — serialized turn queue + revision guard', () => {
     const out: number[] = []
     void q.push(async () => { await wait(20); out.push(1) })
     void q.push(() => { out.push(2) })
+    await wait(1) // task 1 has started (a running task finishes); task 2 is still queued
     q.clear()
     void q.push(() => { throw new Error('bad') })
     await q.push(() => { out.push(3) })
@@ -398,8 +400,9 @@ async function fixture(over: { partner?: string; owner?: string; exp?: number } 
   const source = { candidateSetId: 'set-1', candidateId: 'c1', turn, edited: false, proof, draftedFrom: partner, current }
   return { partner, turn, text, payload, proof, current, body, source }
 }
-const evalWith = (f: Awaited<ReturnType<typeof fixture>>, over: Record<string, unknown> = {}) =>
-  evaluateCandidateSource({ secret: SECRET, owner: 'user-1', body: f.body, source: f.source, ...over } as Parameters<typeof evaluateCandidateSource>[0])
+type EvalFixture = { body: Awaited<ReturnType<typeof fixture>>['body']; source: Record<string, unknown> }
+const evalWith = (f: EvalFixture, over: Record<string, unknown> = {}) =>
+  evaluateCandidateSource({ secret: SECRET, owner: 'user-1', body: f.body, source: f.source, ...over } as unknown as Parameters<typeof evaluateCandidateSource>[0])
 
 describe('C #31 — stateless signed candidate proof', () => {
   it('round-trips, and rejects tampering, a wrong secret, malformed input and expiry', async () => {

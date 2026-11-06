@@ -356,3 +356,12 @@ None of these can be done from code. Do them in order. Without any keys the app 
 3. Press **STOP** while it's speaking; audio must stop at once.
 4. Compare spend in the AssemblyAI, Groq and LiveKit dashboards with **Metrics & measurements → Reconciliation**.
 
+
+
+## Live checks (opt-in, budget-capped; key from the environment ONLY)
+
+```bash
+ASSEMBLYAI_API_KEY=... REVOICE_BASE_URL=https://stillmee.vercel.app npm run smoke:live   # provider + deployed-app checks (37)
+ASSEMBLYAI_API_KEY=... npm run smoke:worker   # worker plugin TTS -> STT (universal-3-6-pro) -> TurnAdapter on real provider events
+```
+Last run: smoke:live 37/37, smoke:worker 5/5 (revisions supersede, single final, authoritative transcript).
