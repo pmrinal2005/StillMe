@@ -143,6 +143,13 @@ export class TurnTracker {
     }
   }
 
+  /** F: adopt the SERVER-issued generation after a reconnect (drops every turn: all earlier candidates are stale). */
+  setGeneration(generation: number) {
+    this.generation = generation
+    this.turns.clear()
+    this.order = []
+  }
+
   /** Room reconnect / new session: invalidates every outstanding candidate and approval. */
   bumpGeneration() {
     this.generation += 1

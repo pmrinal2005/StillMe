@@ -171,6 +171,8 @@ export const ControlMessage = z.discriminatedUnion('type', [
    * replaces partner audio with silence so our own output is never transcribed. Auto-expires after `ttlMs`.
    */
   z.object({ type: z.literal('gate'), on: z.boolean(), ttlMs: z.number().int().min(0).max(120_000).optional() }),
+  /** F: reconnect => the owner device forwards the SERVER-issued generation (the worker only accepts a higher one). */
+  z.object({ type: z.literal('generation'), generation: z.number().int().min(1).max(10_000) }),
 ])
 
 export const StatusMessage = z.object({

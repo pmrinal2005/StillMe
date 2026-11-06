@@ -9,6 +9,7 @@ import { durableSttByRoom, durableSubject, settleByRef, settleDurableId } from '
 import { DIRECT_STT_RE, ROOM_RE, sttMinutesToCommit } from '@/lib/spend-refs'
 import { logEvent } from '@/lib/server/log'
 import { withJsonErrors } from '@/lib/server/route'
+import { sessionClose } from '@/lib/server/ops-db'
 
 export const dynamic = 'force-dynamic'
 
@@ -68,6 +69,7 @@ async function handlePOST(req: Request) {
         if (row?.status === 'reserved') await settleDurableId(row.id, 'assemblyai_stt', true, sttMinutesToCommit({ reserved: row.units, startedAt: row.createdAt }))
       }
     }
+    if (!direct) void sessionClose(room, reason) // E48
     logEvent({ evt: 'session_end', room, reason, minutes: used, via: s.via, repeat: !first, byRef: settled > 0 })
     return json({ ok: true, minutesUsed: used })
   } catch (e) {

@@ -22,6 +22,8 @@ export interface ListenerEvents {
   onPartnerPresence?: (present: boolean) => void
   /** B5: the voice worker (agent participant) joined or left the room. */
   onAgentPresence?: (present: boolean) => void
+  /** F: the owner's room connection came back after a gap — the app must obtain a NEW generation. */
+  onReconnected?: () => void
 }
 
 const enc = new TextEncoder()
@@ -75,7 +77,10 @@ export class LiveKitListener {
       })
       .on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()))
       .on(RoomEvent.Reconnecting, () => this.ev.onStatus({ state: 'reconnecting' }))
-      .on(RoomEvent.Reconnected, () => this.ev.onStatus({ state: 'listening' }))
+      .on(RoomEvent.Reconnected, () => {
+        this.ev.onStatus({ state: 'listening' })
+        this.ev.onReconnected?.()
+      })
       .on(RoomEvent.Disconnected, () => this.ev.onStatus({ state: 'closed' }))
       .on(RoomEvent.ParticipantConnected, (p) => (p.isAgent ? this.onAgent(true) : this.ev.onPartnerPresence?.(true)))
       .on(RoomEvent.ParticipantDisconnected, (p) => (p.isAgent ? this.onAgent(false) : this.ev.onPartnerPresence?.(false)))
@@ -130,6 +135,12 @@ export class LiveKitListener {
     document.querySelectorAll<HTMLAudioElement>('audio[data-revoice="agent-audio"]').forEach((a) => (a.muted = true))
     setTimeout(() => document.querySelectorAll<HTMLAudioElement>('audio[data-revoice="agent-audio"]').forEach((a) => (a.muted = false)), 400)
     await this.send(DataTopics.control, { type: 'stop', playbackAttemptId }, this.agentIds()).catch(() => undefined)
+  }
+
+  /** F: tell the worker the server-issued generation (monotonic; it ignores anything not newer). */
+  async sendGeneration(generation: number) {
+    const to = this.agentIds()
+    if (to.length) await this.send(DataTopics.control, ControlMessage.parse({ type: 'generation', generation }), to).catch(() => undefined)
   }
 
   /** Push-to-listen / session pause: the worker disconnects its STT stream (stops billing) while paused. */

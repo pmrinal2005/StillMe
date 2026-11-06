@@ -1,5 +1,5 @@
 import 'server-only'
-import { BudgetLedger, GUEST_LIMITS, GUEST_POOL_LIMITS } from '../budget'
+import { BudgetLedger, GUEST_LIMITS, GUEST_POOL_LIMITS, PROJECT_LIMITS } from '../budget'
 import { MemoryReplayStore } from '../approval'
 import type { TurnRef } from '../contracts'
 
@@ -50,7 +50,7 @@ export interface ActiveSession {
 const g = globalThis as unknown as { __rv?: RvState }
 if (g.__rv && !g.__rv.settledRooms) g.__rv.settledRooms = new Map() // hot-reload safety
 if (!g.__rv) {
-  g.__rv = { ledgers: new Map(), projectLedger: new BudgetLedger(), replay: new MemoryReplayStore(), turns: new Map(), candidates: new Map(), sessions: new Map(), phoneCodes: new Map(), phoneReservations: new Map(), phoneMinutes: new Map(), settledRooms: new Map(), reconciliations: [] }
+  g.__rv = { ledgers: new Map(), projectLedger: new BudgetLedger(PROJECT_LIMITS), replay: new MemoryReplayStore(), turns: new Map(), candidates: new Map(), sessions: new Map(), phoneCodes: new Map(), phoneReservations: new Map(), phoneMinutes: new Map(), settledRooms: new Map(), reconciliations: [] }
 }
 
 /** Per-user ledger AND a project-wide ledger: both must allow a request (intersecting limits). */

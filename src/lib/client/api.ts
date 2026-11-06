@@ -163,8 +163,8 @@ export const api = {
       body: JSON.stringify(req),
     }),
   suggest: (req: SuggestRequest, signal?: AbortSignal) => call<{ set: CandidateSet }>('/api/suggest', { method: 'POST', body: JSON.stringify(req), signal }),
-  startSession: (b: { mode: string; voiceId: string; outputLanguage: string; inputLanguages: string[]; keyterms: string[]; contextPrompt?: string; minutes?: number; replace?: boolean }) =>
-    call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; ticket: string; maxSessionMinutes: number }>('/api/livekit/session', {
+  startSession: (b: { mode: string; voiceId: string; outputLanguage: string; inputLanguages: string[]; keyterms: string[]; contextPrompt?: string; minutes?: number; replace?: boolean; sttProfile?: 'flagship' | 'economy' }) =>
+    call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; ticket: string; maxSessionMinutes: number; generation: number; sttProfile: 'flagship' | 'economy' }>('/api/livekit/session', {
       method: 'POST',
       body: JSON.stringify({ ...b, ticket: sessionTicket ?? undefined }),
     }),
@@ -182,6 +182,9 @@ export const api = {
     fallbackVoiceId: string; qualityChecked: true; speakerConsent: true; rightsConfirmed: true; biometricTermsAccepted: true
   }) => call<{ ok: true; voice: ClonedVoiceProfile }>('/api/voices', { method: 'POST', body: JSON.stringify(b) }),
   voiceRevoke: (voiceId: string) => call<{ ok: true; voice: ClonedVoiceProfile; thirdPartyActions: string[] }>('/api/voices/revoke', { method: 'POST', body: JSON.stringify({ voiceId }) }),
+  /** F: reconnect => the SERVER issues the next generation (monotonic) and re-signs the ticket. */
+  bumpGeneration: (room: string, ticket: string | null = sessionTicket) =>
+    call<{ ok: true; generation: number; ticket: string }>('/api/livekit/generation', { method: 'POST', body: JSON.stringify({ room, ticket: ticket ?? undefined }) }),
   /** B17: partner invites are single use — mint a fresh link for each additional partner. */
   newInvite: (room: string, ticket: string | null = sessionTicket) =>
     call<{ invite: string; expiresAt: number }>('/api/livekit/invite', { method: 'POST', body: JSON.stringify({ room, ticket: ticket ?? undefined }) }),

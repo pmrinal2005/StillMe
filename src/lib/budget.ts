@@ -41,6 +41,27 @@ type Widen<T> = { -readonly [K in keyof T]: T[K] extends number ? number : Widen
 export type Limits = Widen<typeof LIMITS>
 
 /**
+ * E47: PROJECT-wide daily limits. They used to be the SAME numbers as the per-user limits (the project ledger was built
+ * from LIMITS), so ONE account could consume the whole project's day and the project cap protected nothing. Per-user
+ * caps are the fair share; the project caps bound the SUM of all users (a small multiple of one user, never the
+ * provider-wide spend the owner is willing to lose in a day).
+ */
+export const PROJECT_LIMITS: Limits = {
+  groq: { ...LIMITS.groq },
+  assembly: {
+    ...LIMITS.assembly,
+    dailyTtsChars: LIMITS.assembly.dailyTtsChars * 2,
+    dailyFlagshipListeningMinutes: LIMITS.assembly.dailyFlagshipListeningMinutes * 2,
+    dailyUsd: LIMITS.assembly.dailyUsd * 3,
+  },
+  livekit: { ...LIMITS.livekit },
+}
+
+/** F: streaming-STT profile. `flagship` = Universal-3.6 Pro Realtime; `economy` = Universal-Streaming (English / multilingual). */
+export type SttProfile = 'flagship' | 'economy'
+export const sttRatePerHour = (p: SttProfile | undefined | null): number => (p === 'economy' ? PRICES.sttEconomyPerHour : PRICES.sttFlagshipPerHour)
+
+/**
  * B8: guest limits (Supabase configured but visitor not signed in). Guests may type and speak with
  * library voices and receive suggestions, within much smaller caps. Listening sessions, cloned
  * voices, phone and reconciliation still require a real account.
@@ -246,13 +267,13 @@ export class BudgetLedger {
   }
 
   /** Reserve listening minutes for a bounded session; returns the allowed minutes (0 = deny). */
-  reserveSttMinutes(requested: number, now = Date.now()): { ok: true; minutes: number } | { ok: false; reason: DenyReason } {
+  reserveSttMinutes(requested: number, now = Date.now(), profile: SttProfile = 'flagship'): { ok: true; minutes: number } | { ok: false; reason: DenyReason } {
     const a = this.limits.assembly
     const s = this.state(now)
     const left = a.dailyFlagshipListeningMinutes - s.sttMinutes
     const minutes = Math.min(requested, a.interactiveSessionMinutes, left)
     if (minutes <= 0) return { ok: false, reason: 'stt_daily_minutes' }
-    const usd = (minutes / 60) * PRICES.sttFlagshipPerHour
+    const usd = (minutes / 60) * sttRatePerHour(profile)
     if (s.usd + usd > a.dailyUsd) return { ok: false, reason: 'assembly_daily_usd' }
     if (this.lifetimeUsd + usd > a.totalCreditUsd - a.protectedReserveUsd) return { ok: false, reason: 'assembly_reserve' }
     s.sttMinutes += minutes
@@ -266,14 +287,14 @@ export class BudgetLedger {
    * Pass usedMinutes = 0 for a session that never started (room/dispatch failure).
    * `day` is the UTC day the reservation was made (YYYY-MM-DD); refunds never go below zero.
    */
-  releaseSttMinutes(reservedMinutes: number, usedMinutes = 0, day?: string, now = Date.now()) {
+  releaseSttMinutes(reservedMinutes: number, usedMinutes = 0, day?: string, now = Date.now(), profile: SttProfile = 'flagship') {
     const refund = Math.max(0, reservedMinutes - Math.max(0, usedMinutes))
     if (refund <= 0) return 0
     const key = day ?? dayKey(now)
     const s = this.days.get(key)
     if (!s) return 0 // day already rolled over — nothing outstanding to refund
     const minutes = Math.min(refund, s.sttMinutes)
-    const usd = (minutes / 60) * PRICES.sttFlagshipPerHour
+    const usd = (minutes / 60) * sttRatePerHour(profile)
     s.sttMinutes -= minutes
     s.usd = Math.max(0, s.usd - usd)
     this.lifetimeUsd = Math.max(0, this.lifetimeUsd - usd)

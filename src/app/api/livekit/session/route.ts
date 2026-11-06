@@ -13,6 +13,7 @@ import { LIMITS } from '@/lib/budget'
 import { signSessionTicket, usedSttMinutes, verifySessionTicket } from '@/lib/session-ticket'
 import { planExistingSessions } from '@/lib/session-replace'
 import { withJsonErrors } from '@/lib/server/route'
+import { sessionClose, sessionOpen } from '@/lib/server/ops-db'
 
 export const dynamic = 'force-dynamic'
 
@@ -29,6 +30,8 @@ const Body = z.object({
    * A stale session whose ticket this device presents is replaced without it.
    */
   replace: z.boolean().default(false),
+  /** F: `economy` = Universal-Streaming ($0.15/h, English + 5 European languages); `flagship` = Universal-3.6 Pro ($0.45/h, 32 languages). */
+  sttProfile: z.enum(['flagship', 'economy']).default('flagship'),
   /** Ticket of the session being replaced (lets any instance settle its reservation — B3/B4). */
   ticket: z.string().max(2000).optional(),
 })
@@ -41,6 +44,7 @@ async function closeExisting(userId: string, room: string, ticket: string | null
   settleLocalStt(userId, room, used)
   if (s?.sttReservationId) await settleDurableId(s.sttReservationId, 'assemblyai_stt', true, used)
   else await settleByRef(room, 'assemblyai_stt', true, used, false) // A3: no id (legacy ticket / LiveKit-only) → by ref
+  void sessionClose(room, 'replaced')
   logEvent({ evt: 'session_end', room, reason: 'replaced', minutes: used })
 }
 
@@ -102,7 +106,7 @@ async function handlePOST(req: Request) {
   // settle it — A3). Every failure path below RELEASES every layer (B3/A7).
   const now = Date.now()
   const room = newRoomName()
-  const spend = await reserveSttSpend(id, req, b.minutes, room, now)
+  const spend = await reserveSttSpend(id, req, b.minutes, room, now, b.sttProfile)
   if (!spend.ok) return json(spend.body, spend.status)
   const minutes = spend.minutes
   const sttDay = spend.day
@@ -122,8 +126,10 @@ async function handlePOST(req: Request) {
       // SEALED server bookkeeping (opaque to participants).
       { ownerIdentity: id.userId, ownerParticipant: ownerIdentity, conversationId, generation: 0, mode: b.mode, maxSessionMinutes: minutes, startedAt: now, sttMinutes: minutes, sttReservationId },
       // Worker-private configuration → agent DISPATCH metadata (never visible to room participants).
-      { ownerIdentity, ownerSub: id.userId, conversationId, generation: 0, mode: b.mode, voiceId: b.voiceId, outputLanguage: b.outputLanguage, inputLanguages: b.inputLanguages, keyterms: b.keyterms, contextPrompt: b.contextPrompt, maxSessionMinutes: minutes },
+      { ownerIdentity, ownerSub: id.userId, conversationId, generation: 0, mode: b.mode, voiceId: b.voiceId, outputLanguage: b.outputLanguage, inputLanguages: b.inputLanguages, keyterms: b.keyterms, contextPrompt: b.contextPrompt, maxSessionMinutes: minutes, sttProfile: b.sttProfile },
     )
+    // E48: durable conversation_sessions / session_members row (content-free bookkeeping; never blocks the session).
+    void sessionOpen({ userId: id.userId, room, conversationId, mode: b.mode, generation: 0, maxMinutes: minutes, sttProfile: b.sttProfile })
     rv().sessions.set(id.userId, { room, conversationId, mode: b.mode, startedAt: now, maxMinutes: minutes, generation: 0, sttMinutes: minutes, sttDay, sttReservationId })
     const ticket = await signSessionTicket(env.approvalSecret(), {
       sub: id.userId,
@@ -138,10 +144,11 @@ async function handlePOST(req: Request) {
       sttReservationId,
     })
     logEvent({ evt: 'session_start', room, kind: b.mode, minutes })
-    return json({ url: env.livekitUrl(), token, room, conversationId, invite, ticket, maxSessionMinutes: minutes, generation: 0 })
+    return json({ url: env.livekitUrl(), token, room, conversationId, invite, ticket, maxSessionMinutes: minutes, generation: 0, sttProfile: spend.profile })
   } catch (e) {
     // B3/B7: never leak the room or the reservation; return a JSON error instead of an empty 500.
     if (roomCreated) await deleteRoom(room)
+    void sessionClose(room, 'error')
     rv().sessions.delete(id.userId)
     await spend.releaseAll()
     logEvent({ evt: 'session_start', status: 'error', room, reason: 'setup_failed', detail: (e as Error).message?.slice(0, 120) })

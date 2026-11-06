@@ -10,6 +10,7 @@ import { logEvent } from '@/lib/server/log'
 import { withJsonErrors } from '@/lib/server/route'
 import { burnAllPairCodes, consumePairCode, dropPairCode, livekitRoomStore, lookupPairCode } from '@/lib/server/phone-store'
 import { bindAllowed, recordBindFailure } from '@/lib/server/phone-guard'
+import { pairBurnAllDurable, pairConsumeDurable, pairLookupDurable, sessionMemberJoin } from '@/lib/server/ops-db'
 
 export const dynamic = 'force-dynamic'
 
@@ -28,6 +29,10 @@ const Body = z.object({
  * not in this instance's memory. A room that still exists IS the active session (rooms are deleted on
  * end — B3/B4), so no instance-local session cache is consulted.
  */
+async function getRoomMetaSafe(room: string) {
+  return (await import('@/lib/server/livekit')).getRoomMeta(room).catch(() => null)
+}
+
 async function handlePOST(req: Request) {
   const raw = await req.text()
   if (!(await verifyWorkerAuth(env.approvalSecret(), req.headers.get('x-revoice-worker'), raw))) return json({ error: 'unauthorized' }, 401)
@@ -54,12 +59,24 @@ async function handlePOST(req: Request) {
   const now = Date.now()
   rv().phoneCodes.delete(key) // instance cache is advisory only
   const store = await livekitRoomStore()
-  const found = await lookupPairCode(store, key, now)
+  // E48: durable, row-locked lookup first (atomic attempt counting); LiveKit metadata is the fallback when it is not there.
+  const durable = await pairLookupDurable(key)
+  if (durable.mode === 'unavailable') return json({ error: 'pair_store_unavailable' }, 503) // fail closed
+  let found: Awaited<ReturnType<typeof lookupPairCode>>
+  if (durable.mode === 'durable') {
+    const m = durable.ok ? await getRoomMetaSafe(durable.room) : null
+    found = durable.ok && m ? { ok: true, room: durable.room, meta: m } : { ok: false, reason: 'invalid_code' }
+  } else {
+    found = await lookupPairCode(store, key, now)
+  }
   if (!found.ok) {
     // B15: a wrong code now COSTS the caller (it used to be free unless it happened to match a live code).
     const tripped = await recordBindFailure(callRoom, identity)
     let burned = 0
-    if (tripped.length) burned = await burnAllPairCodes(store).catch(() => 0)
+    if (tripped.length) {
+      await pairBurnAllDurable()
+      burned = await burnAllPairCodes(store).catch(() => 0)
+    }
     logEvent({ evt: 'phone_bind', status: 'rejected', reason: 'invalid_code', tripped: tripped.join(',') || undefined, burned: burned || undefined })
     return json({ error: tripped.length ? 'phone_locked' : 'invalid_code' }, tripped.length ? 429 : 403)
   }
@@ -82,6 +99,8 @@ async function handlePOST(req: Request) {
   const granted = d?.ok ? Math.min(minutes, d.minutes) : minutes
 
   const call = { identity, minutes: granted, month: monthKey(now), at: now }
+  await pairConsumeDurable(key)
+  void sessionMemberJoin(room, identity, 'caller') // E48
   await consumePairCode(store, room, call) // single use + cross-instance call reservation, one metadata write
   rv().phoneReservations.set(`${room}:${identity}`, { minutes: granted, month: call.month, userId: meta.ownerIdentity, at: now })
   const binding = await signPhoneBinding(env.approvalSecret(), room, identity, now + BINDING_TTL_MS, granted)

@@ -42,7 +42,8 @@ from .recovery import HEALTHY_AFTER_S, Backoff
 from .sources import SourceSelector, priority_for
 from .tracks import TrackInfo, accept_control_from, authorize_track
 from .turns import TurnAdapter
-from .usage import AgentMeter, SttMeter, TtsLedger, agent_report, stt_report
+from .stt_profile import SttChoice, choose_stt
+from .usage import AgentMeter, SttMeter, TtsLedger, agent_report, should_stop, stt_report
 from .wake import VOICE_RMS, PreRoll, WakeDetector, frame_rms
 from .watchdog import Watchdog
 
@@ -90,6 +91,7 @@ class RoomMeta(BaseModel):
     keyterms: list[str] = []
     contextPrompt: str | None = None
     maxSessionMinutes: int = 20
+    sttProfile: str = "flagship"  # F: flagship | economy
 
 
 class StopControl(BaseModel):
@@ -100,6 +102,12 @@ class StopControl(BaseModel):
 class ListenControl(BaseModel):
     type: str
     enabled: bool
+
+
+class GenerationControl(BaseModel):
+    """F: the owner's device reconnected and the web app issued a NEW generation (monotonic). Old approvals become stale."""
+    type: str
+    generation: int
 
 
 class GateControl(BaseModel):
@@ -210,6 +218,7 @@ class OwnerRoom:
     stt_meter: SttMeter = field(default_factory=SttMeter)
     agent_meter: AgentMeter = field(default_factory=lambda: AgentMeter(started_at=time.monotonic()))
     tts_ledger: TtsLedger = field(default_factory=TtsLedger)
+    stt_choice: SttChoice | None = None
 
     # ---------------- usage reports (A1 / A10)
     async def _report(self, payload: dict | None) -> None:
@@ -223,11 +232,25 @@ class OwnerRoom:
             asyncio.create_task(self._report(payload))
 
     async def _report_session(self, final: bool) -> None:
-        """A10: connected STT minutes (authoritative when final) + LiveKit agent minutes for this room."""
+        """A10: connected STT minutes (authoritative when final) + LiveKit agent minutes for this room.
+
+        F: the heartbeat's reply can carry {"stop": true}: the web app re-checked the RUNNING room against the shared limits
+        (project day USD, lifetime protected reserve, this room's own reservation) and a limit is now exceeded.
+        """
         now = time.monotonic()
         room = self.ctx.room.name
-        await self._report(stt_report(room, self.stt_meter, now, final))
+        profile = self.stt_choice.profile if self.stt_choice else self.meta.sttProfile
+        resp = None
+        payload = stt_report(room, self.stt_meter, now, final, profile)
+        if self.env.app_url and self.env.approval_secret:
+            resp = await _post_app(self.env, "/api/worker/usage", payload)
         await self._report(agent_report(room, self.meta.ownerSub, self.agent_meter, now))  # user id (spend attribution), not the opaque identity
+        if not final:
+            why = should_stop(resp)
+            if why and not self.closing:
+                log_event(evt="budget_stop", reason=why)
+                self.watchdog.budget_exhausted = True
+                await self.status("paused", reason=f"budget:{why}")
 
     # ---------------- publishing
     async def send(self, topic: str, msg: dict) -> None:
@@ -256,17 +279,26 @@ class OwnerRoom:
 
         key = self.env.assembly_key
         # BYOK: charges go to the owner's AssemblyAI account, never LiveKit Inference.
-        self.stt = assemblyai.STT(
+        # F: the profile picks the model. Economy = Universal-Streaming ($0.15/h); flagship = Universal-3.6 Pro ($0.45/h).
+        choice = choose_stt(self.meta.sttProfile, self.meta.inputLanguages)
+        self.stt_choice = choice
+        if choice.downgraded_from:
+            log_event(evt="stt_profile_downgrade", reason=choice.reason or "")
+        kw: dict[str, Any] = dict(
             api_key=key,
-            model=STT_MODEL,
+            model=choice.model,
             sample_rate=STT_SAMPLE_RATE,
             base_url=self.env.stt_base_url,
             format_turns=True,
-            mode="balanced",
-            language_codes=self.meta.inputLanguages[:4] or NOT_GIVEN,
-            keyterms_prompt=[k[:50] for k in self.meta.keyterms[:30]] or NOT_GIVEN,
-            prompt=(self.meta.contextPrompt or "")[:300] or NOT_GIVEN,
+            vad_threshold=choice.vad_threshold,
         )
+        if choice.profile == "flagship":
+            kw["mode"] = "balanced"
+            kw["language_codes"] = choice.language_codes or NOT_GIVEN
+            kw["prompt"] = (self.meta.contextPrompt or "")[:300] or NOT_GIVEN
+        if choice.use_keyterms:
+            kw["keyterms_prompt"] = [k[:50] for k in self.meta.keyterms[:30]] or NOT_GIVEN
+        self.stt = assemblyai.STT(**kw)
         self.voice = self.meta.voiceId
         self.language = self.meta.outputLanguage if self.meta.outputLanguage in OUTPUT_LANGUAGES else "english"
         self.tts = assemblyai.TTS(
@@ -614,7 +646,7 @@ class OwnerRoom:
                 return
             cur = self._stop_now(aid)
             self._spawn(self._announce_stop(cur, aid))
-        elif t in ("speak", "listen", "end", "hello", "gate"):
+        elif t in ("speak", "listen", "end", "hello", "gate", "generation"):
             try:
                 self.ctl_queue.put_nowait((t, raw))
             except asyncio.QueueFull:
@@ -648,6 +680,12 @@ class OwnerRoom:
             # B5: presence probe from the owner device. Answer only once fully set up.
             if self.source is not None and not self.closing:
                 await self.status("ready")
+        elif t == "generation":
+            try:
+                gen = GenerationControl.model_validate(raw).generation
+            except ValidationError:
+                return
+            await self._bump_generation(gen)
         elif t == "gate":
             try:
                 g = GateControl.model_validate(raw)
@@ -655,6 +693,23 @@ class OwnerRoom:
                 return
             self.echo.owner_gate(g.on, time.monotonic(), g.ttlMs)
             log_event(evt="owner_gate", status="on" if g.on else "off")
+
+    async def _bump_generation(self, generation: int) -> None:
+        """F: reconnect => NEW generation. MONOTONIC (a replayed/lower value is ignored). Approvals signed for the old
+        generation are refused by the gate (`stale_generation`) and turn ids restart so old candidates go stale.
+        The web app only signs approvals for the generation it issued, so a lying owner device cannot approve anything."""
+        cur = self.gate.expect.generation
+        if generation <= cur or generation > cur + 50:
+            log_event(evt="generation_ignored", status="stale" if generation <= cur else "jump")
+            return
+        # An utterance that is still playing was approved for the OLD generation: stop it, never replay it.
+        if self.gate.current is not None:
+            cur_attempt = self._stop_now(None)
+            self._spawn(self._announce_stop(cur_attempt, None))
+        self.gate.bump_generation(generation)
+        self.adapter.reset(generation)
+        log_event(evt="generation_bump", status="ok")
+        await self.status("listening" if self.listening else "paused", reason=None if self.listening else "user")
 
     async def _speak(self, raw: dict) -> None:
         try:

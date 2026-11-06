@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePrefs } from './usePrefs'
+import { acceptGeneration } from '@/lib/generation'
 import { useScanning } from './useScanning'
 import { StatusBar } from './StatusBar'
 import { Suggestions } from './Suggestions'
@@ -73,7 +74,7 @@ const stableOrder = (s: CandidateSet): CandidateSet => ({ ...s, candidates: [...
 const IDLE_BACKGROUND_END_MS = 3 * 60_000
 
 export function ReVoiceApp() {
-  const { prefs, update } = usePrefs()
+  const { prefs, update, sync: prefsSync, retrySync: retryPrefsSync } = usePrefs()
   useScanning(prefs.scanning, prefs.scanIntervalMs)
 
   const [tab, setTab] = useState<Tab>('session')
@@ -711,6 +712,31 @@ export function ReVoiceApp() {
       // B5: rejections that trigger the automatic HTTP-TTS fallback are announced by onRouteFallback instead.
       if (s.type === 'rejected' && !FALLBACK_REJECTIONS.has(s.reason ?? '')) setNotice(`The voice worker refused that message (${s.reason ?? 'rejected'}). Nothing was spoken.`)
     },
+    // F: the owner's room connection came back after a gap. Everything drafted/approved before it may answer words the owner never
+    // saw, so ask the SERVER for the next generation (monotonic), adopt it locally, and forward it to the worker. Old candidates
+    // and approvals become stale on BOTH sides; nothing is replayed.
+    onReconnected: () => {
+      const cur = sessionRef.current
+      if (!cur || cur.kind !== 'livekit' || !cur.room) return
+      const room = cur.room
+      void api.bumpGeneration(room, cur.ticket ?? getSessionTicket()).then(async (r) => {
+        const s = sessionRef.current
+        if (!s || s.room !== room || !acceptGeneration(s.generation, r.generation)) return
+        s.generation = r.generation
+        s.ticket = r.ticket
+        setSessionTicket(r.ticket)
+        trackerRef.current.setGeneration(r.generation)
+        gate.current.clear()
+        turnQueue.current.clear()
+        suggAbort.current?.abort()
+        setSet(null)
+        setPending(null)
+        setRef.current = null
+        setSession({ ...s })
+        await (listenerRef.current as LiveKitListener | null)?.sendGeneration?.(r.generation)
+        setNotice('Your connection was restored. Earlier suggestions were cleared because you may have missed some of what was said.')
+      }).catch(() => undefined)
+    },
     onPartnerPresence: (p: boolean) => setPartnerPresent(p),
     onAgentPresence: (present: boolean) => {
       const m = presenceRef.current
@@ -1234,7 +1260,7 @@ export function ReVoiceApp() {
               {tab === 'voice' && <VoiceWardrobe voiceId={prefs.voiceId} outputLanguage={prefs.outputLanguage} region={region} onSelect={(id) => update({ voiceId: id })} onVoicesChanged={reloadClones} />}
               {tab === 'settings' && (
                 <div className="grid gap-4">
-                  <SettingsPanel prefs={prefs} update={update} />
+                  <SettingsPanel prefs={prefs} update={update} sync={prefsSync} retrySync={retryPrefsSync} />
                   <label className="rv-glass grid gap-2 p-4 text-sm font-semibold sm:p-5">
                     <span className="flex items-center gap-2"><Icon name="hand" size={16} /> “Hold My Turn” phrase (spoken exactly as written when you press it)</span>
                     <input className="rv-input font-normal" maxLength={120} value={prefs.holdTurnPhrase} onChange={(e) => update({ holdTurnPhrase: e.target.value || 'I have something to add.' })} />

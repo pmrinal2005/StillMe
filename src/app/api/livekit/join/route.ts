@@ -1,12 +1,13 @@
 import { z } from 'zod'
 import { json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
-import { getRoomMeta, parseInvite, partnerToken, verifyInvite } from '@/lib/server/livekit'
+import { evictStalePartners, getRoomMeta, parseInvite, partnerToken, verifyInvite } from '@/lib/server/livekit'
 import { consumeInvite } from '@/lib/server/invites'
 import { allow } from '@/lib/server/rate-limit'
 import { clientIp } from '@/lib/server/spend'
 import { logEvent } from '@/lib/server/log'
 import { withJsonErrors } from '@/lib/server/route'
+import { sessionMemberJoin } from '@/lib/server/ops-db'
 
 export const dynamic = 'force-dynamic'
 
@@ -37,9 +38,13 @@ async function handlePOST(req: Request) {
     const used = await consumeInvite(inv.jti, inv.room, inv.exp)
     if (used === 'used') return json({ error: 'invite_used', message: 'This link was already used. Ask for a new one.' }, 403)
     if (used === 'unavailable') return json({ error: 'invite_store_unavailable', message: 'Could not verify this link right now. Please try again.' }, 503)
+    // E51: a partner whose phone reloaded still has a ghost participant for ~15 s. Evict the stalest partner(s) BEFORE minting
+    // the token so the person actually re-joining is never locked out by their own previous connection ("room full").
+    const evicted = await evictStalePartners(inv.room).catch(() => 0)
     // B1: partnerToken passes TrackSource.MICROPHONE (enum) so toJwt() does not throw.
     const { token, identity } = await partnerToken({ room: inv.room, label: parsed.data.label })
-    logEvent({ evt: 'partner_join', status: 'ok', room: inv.room })
+    void sessionMemberJoin(inv.room, identity, 'partner') // E48: durable session_members row (identity only)
+    logEvent({ evt: 'partner_join', status: 'ok', room: inv.room, evicted: evicted || undefined })
     return json({ url: env.livekitUrl(), token, identity, room: inv.room })
   } catch (e) {
     logEvent({ evt: 'partner_join', status: 'error', detail: (e as Error).message?.slice(0, 120) })

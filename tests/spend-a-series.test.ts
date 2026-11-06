@@ -212,7 +212,9 @@ describe('A1/A10 /api/worker/usage', () => {
     const { POST } = await import('@/app/api/worker/usage/route')
     const room = 'rv-0123456789abcdef01234567'
     await POST(await workerReq({ kind: 'stt', room, minutes: 1.5, final: false }))
-    expect(calls.at(-1)).toMatchObject({ fn: 'progress_by_ref', args: { p_ref: room, p_units: 1.5 } })
+    // F: the heartbeat ALSO re-checks the running room (room_budget_status) after recording progress.
+    expect(calls.find((c) => c.fn === 'progress_by_ref')).toMatchObject({ args: { p_ref: room, p_units: 1.5 } })
+    expect(calls.some((c) => c.fn === 'room_budget_status')).toBe(true)
     await POST(await workerReq({ kind: 'stt', room, minutes: 2.1, final: true }))
     expect(calls.at(-1)).toMatchObject({ fn: 'settle_by_ref', args: { p_ref: room, p_actual_units: 3, p_authoritative: true } })
   })

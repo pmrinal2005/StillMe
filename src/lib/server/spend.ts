@@ -21,7 +21,7 @@ import type { Identity } from './auth'
 import { adminClient } from './durable'
 import { env } from './env'
 import { ledgerFor, projectLedger, guestPoolLedger } from './state'
-import { GUEST_LIMITS, GUEST_POOL_LIMITS, LIMITS, PRICES, type DenyReason } from '../budget'
+import { GUEST_LIMITS, GUEST_POOL_LIMITS, LIMITS, PRICES, PROJECT_LIMITS, sttRatePerHour, type DenyReason, type SttProfile } from '../budget'
 import { hmacSha256Hex } from '../hash'
 
 export type SpendProvider = 'assemblyai_tts' | 'assemblyai_stt' | 'groq'
@@ -71,36 +71,40 @@ interface Caps {
   projectCount: number | null
 }
 
-/** Durable caps for one reservation. Mirrors the in-memory LIMITS / GUEST_LIMITS / GUEST_POOL_LIMITS. */
+/**
+ * Durable caps for one reservation. Mirrors the in-memory LIMITS / GUEST_LIMITS / GUEST_POOL_LIMITS / PROJECT_LIMITS.
+ * E47: the PROJECT caps come from PROJECT_LIMITS (the sum of everyone), the SUBJECT caps from the per-user limits.
+ * They used to be `LIMITS.assembly.dailyUsd` for both, so a single account could spend the whole project's day.
+ */
 export function durableCaps(provider: SpendProvider, guest: boolean): Caps {
   const L = guest ? GUEST_LIMITS : LIMITS
   const P = GUEST_POOL_LIMITS
-  const a = LIMITS.assembly
+  const J = PROJECT_LIMITS
   switch (provider) {
     case 'assemblyai_tts':
       return {
         subjectUnits: L.assembly.dailyTtsChars, subjectUsd: L.assembly.dailyUsd, subjectCount: null,
         poolUnits: guest ? P.assembly.dailyTtsChars : null, poolUsd: guest ? P.assembly.dailyUsd : null, poolCount: null,
-        projectUnits: a.dailyTtsChars * 2, projectUsd: a.dailyUsd, projectCount: null,
+        projectUnits: J.assembly.dailyTtsChars, projectUsd: J.assembly.dailyUsd, projectCount: null,
       }
     case 'assemblyai_stt':
       return {
         subjectUnits: L.assembly.dailyFlagshipListeningMinutes, subjectUsd: L.assembly.dailyUsd, subjectCount: null,
         poolUnits: guest ? 0 : null, poolUsd: guest ? P.assembly.dailyUsd : null, poolCount: null,
-        projectUnits: a.dailyFlagshipListeningMinutes * 2, projectUsd: a.dailyUsd, projectCount: null,
+        projectUnits: J.assembly.dailyFlagshipListeningMinutes, projectUsd: J.assembly.dailyUsd, projectCount: null,
       }
     case 'groq':
       return {
         subjectUnits: L.groq.dailyTokens, subjectUsd: null, subjectCount: L.groq.requestsPerDay,
         poolUnits: guest ? P.groq.dailyTokens : null, poolUsd: null, poolCount: guest ? P.groq.requestsPerDay : null,
-        projectUnits: LIMITS.groq.dailyTokens, projectUsd: null, projectCount: LIMITS.groq.requestsPerDay,
+        projectUnits: J.groq.dailyTokens, projectUsd: null, projectCount: J.groq.requestsPerDay,
       }
   }
 }
 
-export function estUsd(provider: SpendProvider, units: number): number {
+export function estUsd(provider: SpendProvider, units: number, profile?: SttProfile | null): number {
   if (provider === 'assemblyai_tts') return units * PRICES.ttsPerChar
-  if (provider === 'assemblyai_stt') return (units / 60) * PRICES.sttFlagshipPerHour
+  if (provider === 'assemblyai_stt') return (units / 60) * sttRatePerHour(profile)
   return 0
 }
 
@@ -137,7 +141,7 @@ export function setStoreMode(mode: 'v3' | 'legacy' | null) {
 /** Legacy (0001) reservation. Subjects/pools/refs/request counts are not durable here — the in-memory
  *  ledgers (always checked first) still enforce them per instance; the durable layer enforces the
  *  per-user (uuid only), project-daily and protected-reserve caps. */
-async function reserveLegacy(s: DurableSubject, provider: SpendProvider, units: number): Promise<DurableResult> {
+async function reserveLegacy(s: DurableSubject, provider: SpendProvider, units: number, profile?: SttProfile | null): Promise<DurableResult> {
   const sb = adminClient()
   if (!sb) return null
   const c = durableCaps(provider, s.pool === 'guest')
@@ -146,7 +150,7 @@ async function reserveLegacy(s: DurableSubject, provider: SpendProvider, units: 
     p_user: s.user, // null for guests/demo → only project-wide caps apply durably
     p_provider: provider,
     p_units: units,
-    p_est_usd: estUsd(provider, units),
+    p_est_usd: estUsd(provider, units, profile),
     p_user_daily_units: c.subjectUnits ?? big,
     p_project_daily_units: c.projectUnits ?? big,
     p_user_daily_usd: c.subjectUsd ?? big,
@@ -158,19 +162,23 @@ async function reserveLegacy(s: DurableSubject, provider: SpendProvider, units: 
   return row?.ok ? { ok: true, id: row.reservation_id as string, legacy: true } : { ok: false, reason: (row?.reason as string) ?? 'denied' }
 }
 
-/** Durable reservation (0003, with legacy fallback). null = no durable store configured (memory ledgers apply). */
-export async function reserveDurableV3(s: DurableSubject, provider: SpendProvider, units: number, ref: string | null): Promise<DurableResult> {
+/**
+ * Durable reservation (0003+, with legacy fallback). null = no durable store configured (memory ledgers apply).
+ * `profile` (F) is recorded as `stt_profile` when migration 0005 is applied; on an older store the call is retried
+ * WITHOUT it (an unknown named argument must not be mistaken for "0003 missing" and drop us to the legacy RPC).
+ */
+export async function reserveDurableV3(s: DurableSubject, provider: SpendProvider, units: number, ref: string | null, profile?: SttProfile | null): Promise<DurableResult> {
   const sb = adminClient()
   if (!sb) return null
-  if (knownStoreMode() === 'legacy') return reserveLegacy(s, provider, units)
+  if (knownStoreMode() === 'legacy') return reserveLegacy(s, provider, units, profile)
   const c = durableCaps(provider, s.pool === 'guest')
-  const { data, error } = await sb.rpc('reserve_budget_v3', {
+  const args: Record<string, unknown> = {
     p_subject: s.subject,
     p_user: s.user,
     p_pool: s.pool,
     p_provider: provider,
     p_units: units,
-    p_est_usd: estUsd(provider, units),
+    p_est_usd: estUsd(provider, units, profile),
     p_ref: ref,
     p_subject_daily_units: c.subjectUnits,
     p_subject_daily_usd: c.subjectUsd,
@@ -182,11 +190,13 @@ export async function reserveDurableV3(s: DurableSubject, provider: SpendProvide
     p_project_daily_usd: c.projectUsd,
     p_project_daily_count: c.projectCount,
     p_lifetime_spendable_usd: LIMITS.assembly.totalCreditUsd - LIMITS.assembly.protectedReserveUsd,
-  })
+  }
+  let { data, error } = await sb.rpc('reserve_budget_v3', provider === 'assemblyai_stt' && profile ? { ...args, p_stt_profile: profile } : args)
+  if (error && provider === 'assemblyai_stt' && profile && isMissingFunction(error)) ({ data, error } = await sb.rpc('reserve_budget_v3', args))
   if (error) {
     if (isMissingFunction(error)) {
       setStoreMode('legacy')
-      return reserveLegacy(s, provider, units)
+      return reserveLegacy(s, provider, units, profile)
     }
     return { ok: false, reason: 'budget_store_unavailable', unavailable: true } // fail closed
   }
@@ -196,12 +206,12 @@ export async function reserveDurableV3(s: DurableSubject, provider: SpendProvide
 }
 
 /** Settle a durable reservation by id (idempotent: only 'reserved' rows change). */
-export async function settleDurableId(id: string | null | undefined, provider: SpendProvider, commit: boolean, actualUnits?: number) {
+export async function settleDurableId(id: string | null | undefined, provider: SpendProvider, commit: boolean, actualUnits?: number, profile?: SttProfile | null) {
   const sb = adminClient()
   if (!sb || !id) return
   const units = commit ? actualUnits : 0
   await sb
-    .rpc('settle_budget', { p_id: id, p_commit: commit, p_actual_units: units ?? null, p_actual_usd: units === undefined ? null : estUsd(provider, units) })
+    .rpc('settle_budget', { p_id: id, p_commit: commit, p_actual_units: units ?? null, p_actual_usd: units === undefined ? null : estUsd(provider, units, profile) })
     .then(() => undefined, () => undefined)
 }
 
@@ -351,6 +361,7 @@ export interface SttHandle {
   ok: true
   minutes: number
   day: string
+  profile: SttProfile
   durableId: string | null
   /** Release the in-memory ledgers (unused minutes) on this instance. */
   releaseMemory(unused: number): void
@@ -358,22 +369,22 @@ export interface SttHandle {
   releaseAll(): Promise<void>
 }
 
-export async function reserveSttSpend(id: Identity, req: Request, requested: number, ref: string, now = Date.now()): Promise<SttHandle | Deny> {
+export async function reserveSttSpend(id: Identity, req: Request, requested: number, ref: string, now = Date.now(), profile: SttProfile = 'flagship'): Promise<SttHandle | Deny> {
   const day = new Date(now).toISOString().slice(0, 10)
-  const u = ledgerFor(id.userId).reserveSttMinutes(requested, now)
+  const u = ledgerFor(id.userId).reserveSttMinutes(requested, now, profile)
   if (!u.ok) return denyOf(u.reason)
-  const p = projectLedger().reserveSttMinutes(u.minutes, now)
+  const p = projectLedger().reserveSttMinutes(u.minutes, now, profile)
   if (!p.ok) {
-    ledgerFor(id.userId).releaseSttMinutes(u.minutes, 0, day, now) // A7: previously leaked on /api/stt-token
+    ledgerFor(id.userId).releaseSttMinutes(u.minutes, 0, day, now, profile) // A7: previously leaked on /api/stt-token
     return denyOf(p.reason)
   }
   const minutes = p.minutes
-  if (minutes < u.minutes) ledgerFor(id.userId).releaseSttMinutes(u.minutes - minutes, 0, day, now)
+  if (minutes < u.minutes) ledgerFor(id.userId).releaseSttMinutes(u.minutes - minutes, 0, day, now, profile)
   const releaseMemory = (unused: number) => {
-    ledgerFor(id.userId).releaseSttMinutes(unused, 0, day)
-    projectLedger().releaseSttMinutes(unused, 0, day)
+    ledgerFor(id.userId).releaseSttMinutes(unused, 0, day, Date.now(), profile)
+    projectLedger().releaseSttMinutes(unused, 0, day, Date.now(), profile)
   }
-  const d = await reserveDurableV3(await durableSubject(id, req), 'assemblyai_stt', minutes, ref)
+  const d = await reserveDurableV3(await durableSubject(id, req), 'assemblyai_stt', minutes, ref, profile)
   if (d && !d.ok) {
     releaseMemory(minutes)
     return denyOf(d.reason, {}, d.unavailable)
@@ -383,6 +394,7 @@ export async function reserveSttSpend(id: Identity, req: Request, requested: num
     ok: true,
     minutes,
     day,
+    profile,
     durableId,
     releaseMemory,
     async releaseAll() {

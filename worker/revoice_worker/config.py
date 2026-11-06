@@ -10,6 +10,16 @@ import os
 from dataclasses import dataclass
 
 STT_MODEL = "universal-3-6-pro"  # selected explicitly (plugin defaults have changed between releases)
+# F: streaming-STT profiles. `flagship` = Universal-3.6 Pro Realtime ($0.45/h, 32 languages, language steering / keyterms /
+# prompt). `economy` = Universal-Streaming ($0.15/h): English-only or the 6-language multilingual model.
+STT_PROFILES = ("flagship", "economy")
+STT_MODEL_ECONOMY_EN = "universal-streaming-english"
+STT_MODEL_ECONOMY_MULTI = "universal-streaming-multilingual"
+# Languages the economy MULTILINGUAL model covers (ISO 639-1). Anything else needs the flagship profile.
+ECONOMY_MULTI_LANGUAGES = ("en", "es", "de", "fr", "pt", "it")
+# F: voice-activity threshold handed to the provider (0..1). Higher = less sensitive to room noise / the owner's own speaker.
+# Kept moderate: too high clips quiet speakers, which matters more for this audience than a few false starts.
+STT_VAD_THRESHOLD = 0.5
 TTS_MODEL = "assemblyai-tts-1"
 OUTPUT_LANGUAGES = ("english", "spanish", "german", "italian", "portuguese", "french")
 MAX_SPOKEN_CHARS = 1000

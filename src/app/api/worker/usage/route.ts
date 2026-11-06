@@ -7,7 +7,8 @@ import { recordUsage } from '@/lib/server/durable'
 import { logEvent } from '@/lib/server/log'
 import { withJsonErrors } from '@/lib/server/route'
 import { ROOM_RE, workerTtsRef } from '@/lib/spend-refs'
-import { PRICES } from '@/lib/budget'
+import { LIMITS, PRICES, PROJECT_LIMITS, sttRatePerHour } from '@/lib/budget'
+import { roomBudgetStatus } from '@/lib/server/ops-db'
 
 export const dynamic = 'force-dynamic'
 
@@ -24,7 +25,7 @@ export const dynamic = 'force-dynamic'
  */
 const Body = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('tts'), approvalId: z.string().regex(/^[a-f0-9]{16,64}$/), chars: z.number().int().min(0).max(5000) }),
-  z.object({ kind: z.literal('stt'), room: z.string().regex(ROOM_RE), minutes: z.number().min(0).max(24 * 60), final: z.boolean() }),
+  z.object({ kind: z.literal('stt'), room: z.string().regex(ROOM_RE), minutes: z.number().min(0).max(24 * 60), final: z.boolean(), profile: z.enum(['flagship', 'economy']).optional() }),
   z.object({ kind: z.literal('agent'), room: z.string().regex(ROOM_RE), owner: z.string().min(1).max(96), minutes: z.number().min(0).max(24 * 60) }),
 ])
 
@@ -52,10 +53,23 @@ async function handlePOST(req: Request) {
   if (b.kind === 'stt') {
     if (!b.final) {
       await progressByRef(b.room, 'assemblyai_stt', b.minutes)
-      return json({ ok: true, settled: 0 })
+      // F: re-check the RUNNING room against the shared limits on every heartbeat. The room's own minutes were reserved at
+      // start, but project spend, the lifetime protected reserve and the room's reservation itself can change underneath it.
+      // `stop: true` tells the worker to end the session (reason budget) instead of billing past a limit.
+      const rb = await roomBudgetStatus({
+        room: b.room,
+        reportedMinutes: b.minutes,
+        projectDailyUsd: PROJECT_LIMITS.assembly.dailyUsd,
+        lifetimeSpendableUsd: LIMITS.assembly.totalCreditUsd - LIMITS.assembly.protectedReserveUsd,
+      })
+      if (rb && !rb.ok) {
+        logEvent({ evt: 'worker_usage', kind: 'stt', room: b.room, status: 'budget_stop', reason: rb.reason ?? 'denied' })
+        return json({ ok: true, settled: 0, stop: true, reason: rb.reason })
+      }
+      return json({ ok: true, settled: 0, stop: false })
     }
     const n = await settleByRef(b.room, 'assemblyai_stt', true, Math.ceil(b.minutes - 1e-9), true)
-    void recordUsage({ provider: 'assemblyai', kind: 'stt_worker', units: b.minutes, estUsd: (b.minutes / 60) * PRICES.sttFlagshipPerHour })
+    void recordUsage({ provider: 'assemblyai', kind: 'stt_worker', units: b.minutes, estUsd: (b.minutes / 60) * sttRatePerHour(b.profile) })
     logEvent({ evt: 'worker_usage', kind: 'stt', room: b.room, minutes: Math.round(b.minutes * 100) / 100, settled: n })
     return json({ ok: true, settled: n })
   }

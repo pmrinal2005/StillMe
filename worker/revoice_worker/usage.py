@@ -82,8 +82,20 @@ class TtsLedger:
         return {"kind": "tts", "approvalId": approval_id, "chars": max(0, int(chars))}
 
 
-def stt_report(room: str, meter: SttMeter, now: float, final: bool) -> dict:
-    return {"kind": "stt", "room": room, "minutes": meter.minutes(now), "final": final}
+def stt_report(room: str, meter: SttMeter, now: float, final: bool, profile: str | None = None) -> dict:
+    msg: dict = {"kind": "stt", "room": room, "minutes": meter.minutes(now), "final": final}
+    if profile in ("flagship", "economy"):
+        msg["profile"] = profile  # F: lets the app price the settlement at the profile's rate
+    return msg
+
+
+def should_stop(resp: dict | None) -> str | None:
+    """F: the app re-checks the RUNNING room's budget on every heartbeat and answers {"stop": true, "reason": ...}.
+    Anything else (no answer, network error, malformed) keeps the session running on the reservation it already holds."""
+    if isinstance(resp, dict) and resp.get("stop") is True:
+        r = resp.get("reason")
+        return r if isinstance(r, str) and r else "budget"
+    return None
 
 
 def agent_report(room: str, owner: str, meter: AgentMeter, now: float) -> dict:

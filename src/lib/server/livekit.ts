@@ -16,6 +16,16 @@ import { ROOM_RE } from '../spend-refs'
  * Room names are random and unguessable, but authorization — not obscurity — is the boundary.
  */
 
+/**
+ * E51: maxParticipants was 4 and NEVER freed a slot for a partner whose phone reloaded: a stale participant lingers
+ * until LiveKit's ~15 s disconnect timeout, so the legitimate re-join (new invite or the same link on a new tab) was
+ * rejected with a bare "room full". The room now has headroom for the owner + worker + ONE live partner + ONE
+ * reconnecting partner + a SIP caller, and join() evicts the stalest partner when the limit is reached.
+ */
+export const ROOM_MAX_PARTICIPANTS = 6
+/** At most this many partner participants at once (a reload briefly counts twice; stale ones are evicted). */
+export const MAX_LIVE_PARTNERS = 2
+
 export const TOKEN_TTL_SECONDS = 15 * 60
 export const INVITE_TTL_MS = 30 * 60 * 1000
 
@@ -80,6 +90,8 @@ export interface WorkerConfig {
   keyterms: string[]
   contextPrompt?: string
   maxSessionMinutes: number
+  /** F: streaming-STT profile. `economy` = Universal-Streaming ($0.15/h), `flagship` = Universal-3.6 Pro ($0.45/h). */
+  sttProfile?: 'flagship' | 'economy'
 }
 
 /** B16: the owner's LiveKit identity is opaque and per-room, so the partner never learns the user id. */
@@ -137,11 +149,53 @@ export async function createRoomAndDispatch(room: string, meta: RoomMetadata, wo
     name: room,
     emptyTimeout: 120,
     departureTimeout: 30,
-    maxParticipants: 4,
+    maxParticipants: ROOM_MAX_PARTICIPANTS,
     metadata: await sealRoomMeta(env.approvalSecret(), room, meta),
   })
-  const dispatch = new AgentDispatchClient(host, env.livekitKey()!, env.livekitSecret()!)
-  await dispatch.createDispatch(room, env.livekitAgentName(), { metadata: JSON.stringify(worker) })
+  await dispatchSingleWorker(room, worker)
+}
+
+/**
+ * E52: exactly ONE worker per owner room.
+ * A room is created with no agent (no RoomConfiguration dispatch), then ONE explicit dispatch is made. Before this a retry
+ * after a transient error (or two overlapping /api/livekit/session calls) could create a second dispatch → two workers in
+ * one room, each transcribing the partner and each able to speak an approval (double billing, double speech).
+ * If a dispatch for OUR agent already exists we keep the first and delete the extras instead of adding another.
+ */
+export async function dispatchSingleWorker(room: string, worker: WorkerConfig): Promise<{ dispatchId: string; reused: boolean }> {
+  const dispatch = new AgentDispatchClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
+  const name = env.livekitAgentName()
+  const existing = (await dispatch.listDispatch(room).catch(() => [])).filter((d) => d.agentName === name)
+  if (existing.length) {
+    for (const extra of existing.slice(1)) await dispatch.deleteDispatch(extra.id, room).catch(() => undefined)
+    return { dispatchId: existing[0].id, reused: true }
+  }
+  const d = await dispatch.createDispatch(room, name, { metadata: JSON.stringify(worker) })
+  // Two requests racing past the check above both create one: converge on the OLDEST and remove the rest.
+  const all = (await dispatch.listDispatch(room).catch(() => [d])).filter((x) => x.agentName === name)
+  if (all.length > 1) {
+    const keep = [...all].sort((a, b) => (Number(a.state?.createdAt ?? 0) - Number(b.state?.createdAt ?? 0)) || a.id.localeCompare(b.id))[0]
+    for (const x of all) if (x.id !== keep.id) await dispatch.deleteDispatch(x.id, room).catch(() => undefined)
+    return { dispatchId: keep.id, reused: keep.id !== d.id }
+  }
+  return { dispatchId: d.id, reused: false }
+}
+
+/**
+ * E51: make room for a (re)joining partner. Counts partner participants (identity `partner-…`); when the live limit is
+ * reached the STALEST are removed (a reloaded phone's old connection) so the person actually re-joining is never locked
+ * out by their own ghost. Owner, worker and SIP identities are never touched. Returns how many were evicted.
+ */
+export async function evictStalePartners(room: string, keep = MAX_LIVE_PARTNERS - 1): Promise<number> {
+  const rs = new RoomServiceClient(hostUrl(), env.livekitKey()!, env.livekitSecret()!)
+  const partners = (await rs.listParticipants(room).catch(() => [])).filter((p) => p.identity.startsWith('partner-'))
+  if (partners.length <= keep) return 0
+  const stalest = [...partners].sort((a, b) => Number(a.joinedAt ?? 0) - Number(b.joinedAt ?? 0)).slice(0, partners.length - keep)
+  let n = 0
+  for (const p of stalest) {
+    await rs.removeParticipant(room, p.identity).then(() => n++, () => undefined)
+  }
+  return n
 }
 
 export async function deleteRoom(room: string) {
