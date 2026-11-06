@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import type { Prefs, SyncState } from './usePrefs'
+import type { Prefs } from './usePrefs'
 import { INPUT_LANGUAGES, OUTPUT_LANGUAGES, type OutputLanguage } from '@/lib/contracts'
 import { INPUT_LANGUAGE_LABELS, OUTPUT_LANGUAGE_LABELS, hasNoSpokenOutput } from '@/lib/languages'
 
@@ -8,7 +8,7 @@ import { INPUT_LANGUAGE_LABELS, OUTPUT_LANGUAGE_LABELS, hasNoSpokenOutput } from
  * Accessibility + conversation preferences. Input language (what the partner may speak) and
  * spoken-output language (what ReVOICE can say) are deliberately separate controls.
  */
-export function SettingsPanel({ prefs, update, sync, retrySync }: { prefs: Prefs; update: (p: Partial<Prefs>) => void; sync?: SyncState; retrySync?: () => void }) {
+export function SettingsPanel({ prefs, update }: { prefs: Prefs; update: (p: Partial<Prefs>) => void }) {
   const [kt, setKt] = useState('')
   const addKeyterm = () => {
     const t = kt.trim()
@@ -25,13 +25,7 @@ export function SettingsPanel({ prefs, update, sync, retrySync }: { prefs: Prefs
 
   return (
     <section id="settings-panel" aria-labelledby="settings-h" className="rv-glass rv-enter grid gap-5 p-4 sm:p-6">
-      {sync?.state === 'error' && (
-        <p role="alert" id="prefs-sync-error" className="rv-alert rv-alert-warn flex flex-wrap items-center gap-2 text-sm">
-          <span>{sync.message}</span>
-          {retrySync && <button type="button" className="rv-btn text-sm" onClick={retrySync}>Retry now</button>}
-        </p>
-      )}
-      {sync?.state === 'synced' && <p id="prefs-sync-ok" className="rv-muted text-xs" role="status">Settings saved to your account.</p>}
+      <p id="prefs-local-note" className="rv-muted text-xs" role="note">Settings are saved on this device only.</p>
       <header><p className="rv-eyebrow">Access · languages · context</p><h2 id="settings-h" className="rv-section-title">Settings</h2></header>
 
       <fieldset className="rv-panel grid gap-3 p-4">

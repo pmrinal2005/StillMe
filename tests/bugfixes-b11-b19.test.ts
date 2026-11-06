@@ -53,29 +53,31 @@ beforeEach(async () => {
 })
 afterEach(() => vi.unstubAllEnvs())
 
-// ------------------------------------------------------------------------------------------------- B13 / B14
-describe('B13 — operator allowlist fails closed', () => {
-  const real = (over = {}) => ({ userId: '11111111-1111-4111-8111-111111111111', kind: 'supabase' as const, email: 'boss@example.com', emailVerified: true, ...over })
+// ------------------------------------------------------------------------------------------------- B13 / device identity
+describe('B13 — operator token fails closed (no accounts)', () => {
+  const opReq = (token?: string, ip = '5.5.5.5') => new Request('http://x/api/reconcile', { headers: { ...(token ? { 'x-revoice-operator': token } : {}), 'x-forwarded-for': ip } })
 
-  it('with BOTH lists empty nobody is an operator (was: everybody)', async () => {
-    vi.stubEnv('REVOICE_OPERATOR_IDS', '')
-    vi.stubEnv('REVOICE_OPERATOR_EMAILS', '')
+  it('with no REVOICE_OPERATOR_TOKEN configured nobody is an operator, whatever they send', async () => {
+    vi.stubEnv('REVOICE_OPERATOR_TOKEN', '')
     const { isOperator } = await import('@/lib/server/auth')
-    expect(isOperator(real())).toBe(false)
-    expect(isOperator({ userId: 'guest-x', kind: 'guest' })).toBe(false)
-    expect(isOperator({ userId: 'demo-x', kind: 'local-demo' })).toBe(false)
+    expect(await isOperator(opReq('anything'))).toBe(false)
+    expect(await isOperator(opReq())).toBe(false)
   })
 
-  it('id allowlist works; e-mail allowlist needs a CONFIRMED address', async () => {
+  it('only the exact token works; a missing or wrong one does not', async () => {
+    vi.stubEnv('REVOICE_OPERATOR_TOKEN', 'correct-horse-battery-staple')
     const { isOperator } = await import('@/lib/server/auth')
-    vi.stubEnv('REVOICE_OPERATOR_IDS', '11111111-1111-4111-8111-111111111111')
-    expect(isOperator(real({ email: undefined }))).toBe(true)
-    vi.stubEnv('REVOICE_OPERATOR_IDS', '')
-    vi.stubEnv('REVOICE_OPERATOR_EMAILS', 'Boss@Example.com')
-    expect(isOperator(real())).toBe(true)
-    expect(isOperator(real({ emailVerified: false }))).toBe(false)
-    expect(isOperator(real({ email: 'other@example.com' }))).toBe(false)
-    expect(isOperator(real({ anonymous: true }))).toBe(false)
+    expect(await isOperator(opReq('correct-horse-battery-staple'))).toBe(true)
+    expect(await isOperator(opReq('correct-horse-battery-stapl'))).toBe(false)
+    expect(await isOperator(opReq())).toBe(false)
+  })
+
+  it('online guessing is rate limited: after 8 wrong tries even the right token is refused from that client', async () => {
+    vi.stubEnv('REVOICE_OPERATOR_TOKEN', 'right-token-value')
+    const { isOperator } = await import('@/lib/server/auth')
+    for (let i = 0; i < 8; i++) expect(await isOperator(opReq(`wrong-${i}`, '6.6.6.6'))).toBe(false)
+    expect(await isOperator(opReq('right-token-value', '6.6.6.6'))).toBe(false) // locked out
+    expect(await isOperator(opReq('right-token-value', '7.7.7.7'))).toBe(true) // another client is unaffected
   })
 
   it('the reconcile seed is clamped so one typo cannot lock every user out', async () => {
@@ -86,30 +88,64 @@ describe('B13 — operator allowlist fails closed', () => {
     expect(clampReconcileSeed(Number.NaN)).toBe(0)
     expect(clampReconcileSeed(1.5)).toBe(1.5)
   })
+
+  it('the routes ask for the operator header, never an account', () => {
+    for (const f of ['reconcile', 'status']) {
+      const src = fs.readFileSync(path.resolve(__dirname, `../src/app/api/${f}/route.ts`), 'utf8')
+      expect(src).toMatch(/isOperator\(req\)/)
+    }
+  })
 })
 
-describe('B14 — anonymous Supabase users are guests', () => {
-  it('recognises every shape Supabase uses for anonymous users', async () => {
-    const { isAnonymousSupabaseUser } = await import('@/lib/server/auth')
-    expect(isAnonymousSupabaseUser({ is_anonymous: true })).toBe(true)
-    expect(isAnonymousSupabaseUser({ app_metadata: { provider: 'anonymous' } })).toBe(true)
-    expect(isAnonymousSupabaseUser({ app_metadata: { providers: ['anonymous'] } })).toBe(true)
-    expect(isAnonymousSupabaseUser({ is_anonymous: false, app_metadata: { provider: 'google', providers: ['google'] } })).toBe(false)
-    expect(isAnonymousSupabaseUser({ app_metadata: { providers: ['anonymous', 'email'] } })).toBe(false)
+describe('Device identity — signed cookie, deterministic uuid, no sign-in', () => {
+  it('signs and verifies device keys; forged, edited or malformed keys are rejected', async () => {
+    const { deviceKeyFor, parseDeviceKey } = await import('@/lib/server/auth')
+    const id = 'a'.repeat(32)
+    const key = await deviceKeyFor(id)
+    expect(key).toMatch(/^[0-9a-f]{32}\.[0-9a-f]{64}$/)
+    expect(await parseDeviceKey(key)).toBe(id)
+    expect(await parseDeviceKey(`${'b'.repeat(32)}.${key.split('.')[1]}`)).toBeNull() // signature of another id
+    expect(await parseDeviceKey(`${id}.${'0'.repeat(64)}`)).toBeNull()
+    expect(await parseDeviceKey(`${id}.${key.split('.')[1]}.extra`)).toBeNull()
+    expect(await parseDeviceKey('not-a-key')).toBeNull()
+    expect(await parseDeviceKey('')).toBeNull()
+    expect(await parseDeviceKey(null)).toBeNull()
+    expect(await parseDeviceKey(`${'Z'.repeat(32)}.${key.split('.')[1]}`)).toBeNull()
+  })
+
+  it('a different secret invalidates every key (the secret is the trust root)', async () => {
+    const { deviceKeyFor, parseDeviceKey } = await import('@/lib/server/auth')
+    const key = await deviceKeyFor('c'.repeat(32))
+    vi.stubEnv('REVOICE_APPROVAL_SECRET', SECRET + '-rotated')
+    expect(await parseDeviceKey(key)).toBeNull()
+  })
+
+  it('maps a device id to a stable RFC-4122 uuid (durable tables need a real uuid) and different ids to different uuids', async () => {
+    const { userIdForDevice } = await import('@/lib/server/auth')
+    const a = await userIdForDevice('a'.repeat(32))
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(await userIdForDevice('a'.repeat(32))).toBe(a)
+    expect(await userIdForDevice('b'.repeat(32))).not.toBe(a)
+    expect(a).not.toContain('a'.repeat(12)) // the uuid does not leak the device id
+  })
+
+  it('there is no Supabase auth, OAuth, e-mail link or anonymous sign-in anywhere in the server identity code', () => {
+    const raw = fs.readFileSync(path.resolve(__dirname, '../src/lib/server/auth.ts'), 'utf8')
+    const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') // comments may explain what is NOT here
+    expect(code).not.toMatch(/supabase|oauth|getUser|signIn|access.?token|bearer/i)
   })
 })
 
 // ------------------------------------------------------------------------------------------------- B11 / B12
 describe('B11/B12 — server-side voice registry', () => {
   const input = { voiceId: 'clone-abc', label: 'Mine', ownerName: 'Ann', recordingLanguage: 'english' as const, provenance: 'self-recorded' as const, provenanceNote: '', fallbackVoiceId: 'aai-audrey', qualityChecked: true }
-  const acct = (userId: string) => ({ userId, kind: 'supabase' as const })
+  const acct = (userId: string) => ({ userId })
 
-  it('a voice id alone grants nothing: unregistered → not_registered; guests → account_required; library is open', async () => {
+  it('a voice id alone grants nothing: unregistered → not_registered; library is open', async () => {
     const { authorizeVoice, memoryVoiceStore } = await import('@/lib/server/voice-registry')
     const s = memoryVoiceStore()
     expect(await authorizeVoice(s, acct('u1'), 'clone-abc', 'us')).toEqual({ ok: false, reason: 'not_registered' })
-    expect(await authorizeVoice(s, { userId: 'guest-1', kind: 'guest' }, 'clone-abc', 'us')).toEqual({ ok: false, reason: 'account_required' })
-    expect(await authorizeVoice(s, { userId: 'guest-1', kind: 'guest' }, 'aai-audrey', 'us')).toMatchObject({ ok: true, kind: 'library' })
+    expect(await authorizeVoice(s, acct('u-other'), 'aai-audrey', 'us')).toMatchObject({ ok: true, kind: 'library' })
   })
 
   it('registration records full consent server-side and authorizes only the owner', async () => {
@@ -118,7 +154,7 @@ describe('B11/B12 — server-side voice registry', () => {
     const p = await registerClonedVoice(s, 'u1', input, { region: 'us' })
     expect(p).toMatchObject({ speakerConsent: true, rightsConfirmed: true, biometricTermsAccepted: true, revoked: false })
     expect((await authorizeVoice(s, acct('u1'), 'clone-abc', 'us')).ok).toBe(true)
-    // another account that learned the id can neither use it nor claim it
+    // another DEVICE that learned the id can neither use it nor claim it
     expect(await authorizeVoice(s, acct('u2'), 'clone-abc', 'us')).toEqual({ ok: false, reason: 'not_registered' })
     await expect(registerClonedVoice(s, 'u2', input, { region: 'us' })).rejects.toMatchObject({ code: 'voice_claimed', status: 409 })
   })
@@ -140,7 +176,7 @@ describe('B11/B12 — server-side voice registry', () => {
     await expect(registerClonedVoice(s, 'u1', { ...input, voiceId: 'aai-audrey' }, { region: 'us' })).rejects.toMatchObject({ code: 'library_voice' })
   })
 
-  it('account deletion tombstones the clone: nobody can ever re-register or use it', async () => {
+  it('deleting a device\'s data tombstones the clone: nobody can ever re-register or use it', async () => {
     const { authorizeVoice, memoryVoiceStore, registerClonedVoice } = await import('@/lib/server/voice-registry')
     const s = memoryVoiceStore()
     await registerClonedVoice(s, 'u1', input, { region: 'us' })
@@ -149,14 +185,14 @@ describe('B11/B12 — server-side voice registry', () => {
     await expect(registerClonedVoice(s, 'u2', input, { region: 'us' })).rejects.toMatchObject({ code: 'voice_tombstoned', status: 409 })
   })
 
-  it('REVOICE_CLONE_REGISTRANTS restricts who may bind a clone (verified e-mail only)', async () => {
-    const { mayRegisterClone } = await import('@/lib/server/voice-registry')
-    expect(mayRegisterClone({ userId: 'u1' })).toBe(true) // unset → any real account
-    vi.stubEnv('REVOICE_CLONE_REGISTRANTS', 'owner@example.com, uid-7')
-    expect(mayRegisterClone({ userId: 'u1' })).toBe(false)
-    expect(mayRegisterClone({ userId: 'uid-7' })).toBe(true)
-    expect(mayRegisterClone({ userId: 'u1', email: 'owner@example.com', emailVerified: true })).toBe(true)
-    expect(mayRegisterClone({ userId: 'u1', email: 'owner@example.com', emailVerified: false })).toBe(false)
+  it('REVOICE_CLONE_PASSCODE gates registering a clone (unset = open); the check is constant-time and header based', async () => {
+    const { mayRegisterClone } = await import('@/lib/server/auth')
+    const reqWith = (code?: string) => new Request('http://x/api/voices', { method: 'POST', headers: code ? { 'x-revoice-clone-passcode': code } : {} })
+    expect(await mayRegisterClone(reqWith())).toBe(true) // unset -> any device may register
+    vi.stubEnv('REVOICE_CLONE_PASSCODE', 'owner-pass')
+    expect(await mayRegisterClone(reqWith())).toBe(false)
+    expect(await mayRegisterClone(reqWith('nope'))).toBe(false)
+    expect(await mayRegisterClone(reqWith('owner-pass'))).toBe(true)
   })
 
   it('the consent attestation a browser sends to /api/approve is ignored (schema never reads it)', () => {
@@ -293,7 +329,7 @@ describe('B18 — minimal public status', () => {
   })
 
   it('the export route no longer returns the raw ledger snapshot (it carried lifetime/spendable project credit)', () => {
-    const src = fs.readFileSync(path.resolve(__dirname, '../src/app/api/account/export/route.ts'), 'utf8')
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/app/api/data/export/route.ts'), 'utf8')
     expect(src).toContain('userMeters(ledgerFor(id.userId).snapshot())')
     expect(src).not.toMatch(/usage:\s*ledgerFor\(id\.userId\)\.snapshot\(\)/)
   })
@@ -301,26 +337,26 @@ describe('B18 — minimal public status', () => {
   it('the route puts userId, project budget, spend store, secret source and model under `operator` only', () => {
     const src = fs.readFileSync(path.resolve(__dirname, '../src/app/api/status/route.ts'), 'utf8')
     // Only the response BODY literal is public (id.userId is legitimately used server-side to pick the caller's ledger).
-    const publicBody = src.slice(src.indexOf('const body: PublicStatus = {'), src.indexOf('if (isOperator(id))'))
-    expect(publicBody).toContain('identity: { kind: id.kind }')
+    const publicBody = src.slice(src.indexOf('const body: PublicStatus = {'), src.indexOf('if (operator)'))
+    expect(publicBody).not.toContain('identity')
     expect(publicBody).not.toMatch(/\buserId\s*:/)
     for (const leak of ['projectLedger', 'spendStoreStatus', 'approvalSecretSource', 'groqModel', 'lifetime', 'spendable']) expect(publicBody).not.toContain(leak)
-    expect(src.slice(src.indexOf('if (isOperator(id))'))).toContain('projectLedger')
+    expect(src.slice(src.indexOf('if (operator)'))).toContain('projectLedger')
   })
 })
 
 // ------------------------------------------------------------------------------------------------- B19
-describe('B19 — real account deletion and export', () => {
+describe('B19 — real deletion of a device\'s server data, and export', () => {
   it('without a durable store it tombstones voices, closes live rooms and reports every step', async () => {
     const { memoryVoiceStore, registerClonedVoice } = await import('@/lib/server/voice-registry')
     vi.stubEnv('LIVEKIT_URL', 'wss://x.livekit.cloud')
     vi.stubEnv('LIVEKIT_API_KEY', 'k')
     vi.stubEnv('LIVEKIT_API_SECRET', 's')
-    const id = { userId: 'demo-1', kind: 'local-demo' as const }
+    const id = { userId: 'demo-1', deviceId: 'd'.repeat(32) }
     await registerClonedVoice(memoryVoiceStore(), 'demo-1', { voiceId: 'clone-del', label: 'x', ownerName: 'A', recordingLanguage: 'english', provenance: 'self-recorded', provenanceNote: '', fallbackVoiceId: 'aai-audrey', qualityChecked: true }, { region: 'us' })
     rooms.set(ROOM, { ...baseMeta('demo-1'), startedAt: Date.now() - 120_000, sttMinutes: 20 })
-    const { deleteAccount } = await import('@/lib/server/account')
-    const r = await deleteAccount(id)
+    const { deleteDeviceData } = await import('@/lib/server/account')
+    const r = await deleteDeviceData(id)
     expect(r.voiceIds).toEqual(['clone-del'])
     expect(r.steps.map((s) => s.step)).toEqual(expect.arrayContaining(['tombstone_voices', 'close_rooms']))
     expect(r.steps.every((s) => s.ok)).toBe(true)
@@ -328,20 +364,25 @@ describe('B19 — real account deletion and export', () => {
     expect(await memoryVoiceStore().claim('clone-del')).toBe('tombstoned')
   })
 
-  it('every user-owned table is covered by delete and the delete route demands a typed confirmation', async () => {
+  it('every device-owned table is covered by delete (voice_profiles before biometric_consents) and the delete route demands a typed confirmation', async () => {
     const { USER_TABLES, EXPORT_TABLES } = await import('@/lib/server/account')
     for (const t of ['voice_profiles', 'biometric_consents', 'phrases', 'conversation_sessions', 'phone_calls', 'audit_events']) expect(USER_TABLES).toContain(t)
     expect(EXPORT_TABLES).toContain('voice_profiles')
-    expect(USER_TABLES).not.toContain('budget_reservations' as never) // spend history must outlive the user
-    const route = fs.readFileSync(path.resolve(__dirname, '../src/app/api/account/delete/route.ts'), 'utf8')
-    expect(route).toContain("z.literal('DELETE MY ACCOUNT')")
+    expect(USER_TABLES).not.toContain('budget_reservations' as never) // spend history must outlive the device
+    expect(USER_TABLES.indexOf('voice_profiles')).toBeLessThan(USER_TABLES.indexOf('biometric_consents')) // append-only trigger (0005)
+    const route = fs.readFileSync(path.resolve(__dirname, '../src/app/api/data/delete/route.ts'), 'utf8')
+    expect(route).toContain("z.literal('DELETE MY DATA')")
   })
 
   it('the delete route refuses without confirmation (no side effects)', async () => {
-    const { POST } = await import('@/app/api/account/delete/route')
-    const res = await POST(new Request('http://x/api/account/delete', { method: 'POST', body: '{}' }))
+    const { POST } = await import('@/app/api/data/delete/route')
+    const res = await POST(new Request('http://x/api/data/delete', { method: 'POST', body: '{}' }))
     expect(res.status).toBe(400)
     expect((await res.json()).error).toBe('confirmation_required')
+  })
+
+  it('the old /api/account/* routes are gone', () => {
+    expect(fs.existsSync(path.resolve(__dirname, '../src/app/api/account'))).toBe(false)
   })
 })
 
@@ -356,5 +397,21 @@ describe('migration 0004 matches what the code relies on', () => {
     expect(sql).toMatch(/drop policy if exists owner_all on public\.voice_profiles/)
     expect(sql).toMatch(/create policy owner_read on public\.voice_profiles for select/)
     for (const fn of ['consume_invite', 'guard_hit', 'guard_count', 'settle_open_reservations']) expect(sql).toMatch(new RegExp(`revoke all on function public\\.${fn}`))
+  })
+})
+
+describe('migration 0007 (no sign-in)', () => {
+  const sql = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/0007_no_signin.sql'), 'utf8')
+  it('drops every foreign key to auth.users, because device uuids are not auth users', () => {
+    expect(sql).toContain("c.confrelid = 'auth.users'::regclass")
+    expect(sql).toMatch(/drop constraint %I/)
+  })
+  it('removes every browser policy and privilege: the database is reached only from the server', () => {
+    expect(sql).toMatch(/revoke all on public\.%I from anon, authenticated/)
+    expect(sql).toMatch(/drop policy if exists %I/)
+    expect(sql).toMatch(/revoke all on all functions in schema public from anon, authenticated/)
+  })
+  it('is idempotent (only drop-if-exists / revoke / comment statements)', () => {
+    expect(sql).not.toMatch(/create table|insert into|alter table [^;]* add constraint/i)
   })
 })

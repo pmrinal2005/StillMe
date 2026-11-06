@@ -29,7 +29,7 @@ export function durableReplay(userId: string, textHash: string): ReplayStore {
     async consume(approvalId: string, expiresAt: number) {
       const { data, error } = await sb.rpc('consume_approval', {
         p_approval_id: approvalId,
-        p_user: isUuid(userId) ? userId : null,
+        p_user: null, // device ids are not auth users; replay protection needs only the approval id (works before migration 0007)
         p_text_hash: textHash,
         p_expires_at: new Date(expiresAt).toISOString(),
       })

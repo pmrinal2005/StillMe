@@ -1,5 +1,5 @@
 import 'server-only'
-import { BudgetLedger, GUEST_LIMITS, GUEST_POOL_LIMITS, PROJECT_LIMITS } from '../budget'
+import { BudgetLedger, NETWORK_POOL_LIMITS, PROJECT_LIMITS } from '../budget'
 import { MemoryReplayStore } from '../approval'
 import type { TurnRef } from '../contracts'
 
@@ -57,16 +57,24 @@ if (!g.__rv) {
 export function ledgerFor(userId: string): BudgetLedger {
   let l = g.__rv!.ledgers.get(userId)
   if (!l) {
-    // B8: guests get much smaller per-device caps.
-    l = new BudgetLedger(userId.startsWith('guest-') ? GUEST_LIMITS : undefined)
+    l = new BudgetLedger()
     g.__rv!.ledgers.set(userId, l)
   }
   return l
 }
 export const projectLedger = () => g.__rv!.projectLedger
-/** B8: one shared pool for ALL guests, so clearing cookies cannot mint unlimited guest budget. */
-const gp = globalThis as unknown as { __rvGuestPool?: BudgetLedger }
-export const guestPoolLedger = () => (gp.__rvGuestPool ??= new BudgetLedger(GUEST_POOL_LIMITS))
+/** One shared pool PER NETWORK (key = HMAC of the client IP), so clearing cookies cannot mint unlimited device budget. */
+const np = globalThis as unknown as { __rvNetPools?: Map<string, BudgetLedger> }
+export const networkPoolLedger = (key: string): BudgetLedger => {
+  const m = (np.__rvNetPools ??= new Map())
+  let l = m.get(key)
+  if (!l) {
+    if (m.size >= 2000) m.delete(m.keys().next().value as string) // bounded memory on a long-lived instance
+    l = new BudgetLedger(NETWORK_POOL_LIMITS)
+    m.set(key, l)
+  }
+  return l
+}
 export const replayStore = () => g.__rv!.replay
 
 export const turnKey = (r: Pick<TurnRef, 'conversationId' | 'generation' | 'turnId'>) => `${r.conversationId}:${r.generation}:${r.turnId}`

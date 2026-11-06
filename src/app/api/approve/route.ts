@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { latestTurn } from '@/lib/server/state'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
@@ -19,7 +19,6 @@ export const dynamic = 'force-dynamic'
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
   const raw = await req.json().catch(() => null)
   const parsed = ApproveRequest.extend({ ticket: z.string().max(2000).optional() }).safeParse(raw)
   if (!parsed.success) return json({ error: 'invalid_request', issues: parsed.error.issues.slice(0, 5) }, 400)
@@ -30,7 +29,6 @@ async function handlePOST(req: Request) {
   // B4: verified via the signed session ticket (works on any serverless instance), falling back
   // to this instance's cache and then LiveKit's server-set room metadata — never memory alone.
   if (body.roomName) {
-    { const gate = requireAccount(id, 'listening sessions'); if (gate) return gate }
     const s = await resolveOwnedSession(id.userId, body.roomName, ticketFrom(req, { ticket })).catch(() => null)
     if (!s || s.expired || s.conversationId !== body.conversationId || s.generation !== body.generation) return json({ error: 'wrong_room' }, 403)
   }
@@ -40,8 +38,7 @@ async function handlePOST(req: Request) {
   try {
     const va = await authorizeVoice(voiceStoreFor(id.userId), id, body.voiceId, env.assemblyRegion())
     if (!va.ok) {
-      if (va.reason === 'account_required') { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
-      return json({ error: 'voice_not_authorized', reason: va.reason, message: 'This voice is not authorized for your account.' }, 403)
+      return json({ error: 'voice_not_authorized', reason: va.reason, message: 'This voice is not registered to this device.' }, 403)
     }
   } catch (e) {
     if (e instanceof VoiceRegistryError) return json({ error: e.code, message: e.message }, e.status)

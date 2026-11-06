@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, isOperator, json, requireAccount, unauthorized } from '@/lib/server/auth'
+import { getIdentity, isOperator, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { monthKey, phoneMonthUsedDurable, projectLedger, rv } from '@/lib/server/state'
 import { adminClient, audit, usageSummary } from '@/lib/server/durable'
@@ -15,10 +15,8 @@ export const dynamic = 'force-dynamic'
  *  GET  → app-estimated usage (durable store if configured, else this process) + recorded provider figures + drift.
  *  POST → operator records figures read from the AssemblyAI / Groq / LiveKit dashboards (content-free).
  */
-// B13: operator access is `isOperator()` from auth.ts — FAIL CLOSED. With REVOICE_OPERATOR_IDS and
-// REVOICE_OPERATOR_EMAILS both empty NOBODY is an operator (the old local copy returned `true` for everyone, so any
-// signed-in or anonymous account could read project spend and post provider figures). Anonymous Supabase users are
-// guests and never operators; e-mail operators need a CONFIRMED address.
+// Operator access = the caller presents REVOICE_OPERATOR_TOKEN in `x-revoice-operator` (see auth.ts). There are no
+// accounts. FAIL CLOSED: with no token configured nobody is an operator; wrong guesses are rate limited.
 
 const Body = z.object({
   provider: z.enum(['assemblyai', 'groq', 'livekit', 'supabase', 'vercel']),
@@ -46,9 +44,7 @@ async function appEstimate() {
 
 async function handleGET(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'reconciliation'); if (gate) return gate }
-  if (!isOperator(id)) return json({ error: 'forbidden' }, 403)
+  if (!(await isOperator(req))) return json({ error: 'forbidden' }, 403)
   const estimate = await appEstimate()
   let recorded: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string; at: number }[] = rv().reconciliations.map((r) => ({ ...r }))
   const sb = adminClient()
@@ -62,9 +58,7 @@ async function handleGET(req: Request) {
 
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'reconciliation'); if (gate) return gate }
-  if (!isOperator(id)) return json({ error: 'forbidden' }, 403)
+  if (!(await isOperator(req))) return json({ error: 'forbidden' }, 403)
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request', issues: parsed.error.issues.slice(0, 5) }, 400)
   const b = parsed.data

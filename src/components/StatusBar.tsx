@@ -58,8 +58,6 @@ export function StatusBar(props: {
         </li>
         <li className="rv-badge hidden sm:inline-flex"><Icon name="user" size={13} />Voice: {voiceLabel}</li>
         {voiceWarning && <li className="rv-badge rv-badge-warn" role="status"><Icon name="alert" size={13} />{voiceWarning}</li>}
-        {status?.identity.kind === 'guest' && <li className="rv-badge rv-badge-warn">Guest · reduced daily limits</li>}
-        {status?.identity.kind === 'local-demo' && <li className="rv-badge rv-badge-warn">Local prototype identity (Supabase not configured)</li>}
         {status && !status.providers.durableStore && <li className="rv-badge hidden md:inline-flex">Single-instance stores</li>}
       </ul>
       {b && (

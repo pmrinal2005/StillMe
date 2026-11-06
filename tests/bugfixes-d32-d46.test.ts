@@ -6,13 +6,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const getUser = vi.fn()
-const createClientSpy = vi.fn(() => ({ auth: { getUser } }))
-vi.mock('@supabase/supabase-js', () => ({ createClient: (...a: unknown[]) => (createClientSpy as unknown as (...x: unknown[]) => unknown)(...a) }))
-
-import { evictAuthCache, isRetryableAuthError, jwtExpiryMs, TOKEN_CACHE_TTL_MS, verifyAccessToken } from '@/lib/server/auth'
-import { authNoteFor, setAuthNote } from '@/lib/server/auth-note'
-import { isTerminalRefreshError } from '@/lib/client/api'
 import { planExistingSessions } from '@/lib/session-replace'
 import { AssemblyError, isNetworkFailure, parseVoiceExpiryMs, providerFailure, sanitizeProviderCode } from '@/lib/server/assemblyai'
 import { adoptProviderExpiry, fallbackVoiceFor, LIBRARY_VOICES } from '@/lib/voices'
@@ -27,150 +20,55 @@ import { signed } from './helpers'
 
 const root = path.resolve(__dirname, '..')
 
-function jwt(expSec: number): string {
-  const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url')
-  return `${b64({ alg: 'HS256' })}.${b64({ exp: expSec, sub: 'u' })}.sig`
-}
-const user = (id = 'u1') => ({ id, email: `${id}@x.test` })
+// ---------------------------------------------------------------------------------------------- #32 - #34 (replaced)
+// These three bugs were about Supabase token verification, the guest fallback and session recovery. There is no sign-in any
+// more, so the whole class of problem is gone. What replaces them is pinned here.
+describe('D #32-#34 (superseded) — no tokens, no verification round-trip, no guest fallback, no recovery loop', () => {
+  const read = (f: string) => fs.readFileSync(path.join(root, f), 'utf8')
 
-// ---------------------------------------------------------------------------------------------- #32
-describe('D #32 — cached token verification', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-11-06T10:00:00Z'))
-    evictAuthCache()
-    getUser.mockReset()
-    createClientSpy.mockClear()
-  })
-  afterEach(() => vi.useRealTimers())
-
-  it('asks Supabase once for repeated requests with the same token (was: a network round-trip per request)', async () => {
-    getUser.mockResolvedValue({ data: { user: user() }, error: null })
-    const t = jwt(Math.floor(Date.now() / 1000) + 3600)
-    for (let i = 0; i < 5; i++) expect((await verifyAccessToken('https://s.test', 'anon', t)).status).toBe('ok')
-    expect(getUser).toHaveBeenCalledTimes(1)
+  it('the server never calls an identity provider: resolving the caller is a local HMAC check', () => {
+    const src = read('src/lib/server/auth.ts')
+    expect(src).not.toMatch(/@supabase\/supabase-js|createClient|\.auth\./)
+    expect(src).toMatch(/parseDeviceKey\(jar\.get\(DEVICE_COOKIE\)\?\.value\)/)
   })
 
-  it('reuses ONE client for the instance (was: createClient per request)', async () => {
-    getUser.mockResolvedValue({ data: { user: user() }, error: null })
-    await verifyAccessToken('https://s.test', 'anon', jwt(Math.floor(Date.now() / 1000) + 3600))
-    await verifyAccessToken('https://s.test', 'anon', jwt(Math.floor(Date.now() / 1000) + 3601))
-    expect(createClientSpy.mock.calls.length).toBeLessThanOrEqual(1)
-  })
-
-  it('re-verifies after the TTL', async () => {
-    getUser.mockResolvedValue({ data: { user: user() }, error: null })
-    const t = jwt(Math.floor(Date.now() / 1000) + 3600)
-    await verifyAccessToken('https://s.test', 'anon', t)
-    vi.advanceTimersByTime(TOKEN_CACHE_TTL_MS + 1)
-    await verifyAccessToken('https://s.test', 'anon', t)
-    expect(getUser).toHaveBeenCalledTimes(2)
-  })
-
-  it('concurrent requests share one in-flight check', async () => {
-    vi.useRealTimers() // crypto.subtle.digest (token hash) resolves off the microtask queue, so wait in real time
-    let release!: () => void
-    getUser.mockImplementation(() => new Promise((r) => { release = () => r({ data: { user: user() }, error: null }) }))
-    const t = jwt(Math.floor(Date.now() / 1000) + 3600)
-    const all = Promise.all([verifyAccessToken('https://s.test', 'anon', t), verifyAccessToken('https://s.test', 'anon', t), verifyAccessToken('https://s.test', 'anon', t)])
-    await vi.waitFor(() => expect(getUser).toHaveBeenCalledTimes(1)) // all three callers are waiting on the SAME check
-    await new Promise((r) => setTimeout(r, 20)) // give the other two time to (wrongly) start their own
-    expect(getUser).toHaveBeenCalledTimes(1)
-    release()
-    const res = await all
-    expect(res.every((r) => r.status === 'ok')).toBe(true)
-    expect(getUser).toHaveBeenCalledTimes(1)
-  })
-
-  it('never serves a token past its own JWT expiry', async () => {
-    getUser.mockResolvedValue({ data: { user: user() }, error: null })
-    const t = jwt(Math.floor(Date.now() / 1000) + 10) // 10 s left, minus the 5 s margin
-    await verifyAccessToken('https://s.test', 'anon', t)
-    vi.advanceTimersByTime(6_000)
-    getUser.mockResolvedValue({ data: null, error: { status: 401, name: 'AuthApiError' } })
-    expect((await verifyAccessToken('https://s.test', 'anon', t)).status).toBe('invalid')
-  })
-
-  it('an expired token is never cached', async () => {
-    getUser.mockResolvedValue({ data: { user: user() }, error: null })
-    const t = jwt(Math.floor(Date.now() / 1000) - 60)
-    await verifyAccessToken('https://s.test', 'anon', t)
-    await verifyAccessToken('https://s.test', 'anon', t)
-    expect(getUser).toHaveBeenCalledTimes(2)
-  })
-
-  it('a rejected token is invalid, not unavailable', async () => {
-    getUser.mockResolvedValue({ data: { user: null }, error: { status: 401, name: 'AuthApiError' } })
-    expect(await verifyAccessToken('https://s.test', 'anon', jwt(Math.floor(Date.now() / 1000) + 3600))).toEqual({ status: 'invalid' })
-  })
-
-  it('stale-if-error: a previously verified token survives a brief Auth outage; an unknown one is "unavailable"', async () => {
-    const t = jwt(Math.floor(Date.now() / 1000) + 3600)
-    getUser.mockResolvedValue({ data: { user: user() }, error: null })
-    await verifyAccessToken('https://s.test', 'anon', t)
-    vi.advanceTimersByTime(TOKEN_CACHE_TTL_MS + 1)
-    getUser.mockResolvedValue({ data: { user: null }, error: { status: 503, name: 'AuthRetryableFetchError' } })
-    expect((await verifyAccessToken('https://s.test', 'anon', t)).status).toBe('ok')
-    expect((await verifyAccessToken('https://s.test', 'anon', jwt(Math.floor(Date.now() / 1000) + 3000))).status).toBe('unavailable')
-    getUser.mockRejectedValue(new Error('network down'))
-    expect((await verifyAccessToken('https://s.test', 'anon', jwt(Math.floor(Date.now() / 1000) + 2000))).status).toBe('unavailable')
-  })
-
-  it('evictAuthCache drops a user (account deletion)', async () => {
-    getUser.mockResolvedValue({ data: { user: user('gone') }, error: null })
-    const t = jwt(Math.floor(Date.now() / 1000) + 3600)
-    await verifyAccessToken('https://s.test', 'anon', t)
-    evictAuthCache('gone')
-    await verifyAccessToken('https://s.test', 'anon', t)
-    expect(getUser).toHaveBeenCalledTimes(2)
-  })
-
-  it('jwtExpiryMs / isRetryableAuthError helpers', () => {
-    expect(jwtExpiryMs(jwt(1_800_000_000))).toBe(1_800_000_000_000)
-    expect(jwtExpiryMs('garbage')).toBeNull()
-    expect(isRetryableAuthError({ status: 429 })).toBe(true)
-    expect(isRetryableAuthError({ status: 500 })).toBe(true)
-    expect(isRetryableAuthError({ name: 'AuthRetryableFetchError' })).toBe(true)
-    expect(isRetryableAuthError({ status: 401 })).toBe(false)
-    expect(isRetryableAuthError(null)).toBe(false)
-  })
-})
-
-// ---------------------------------------------------------------------------------------------- #33 / #34
-describe('D #33/#34 — guest fallback is labelled; client recovers once and signs out when the refresh token is dead', () => {
-  it('the server labels the response of a request that fell back to guest', () => {
-    const req = new Request('https://x.test/api/speak')
-    expect(authNoteFor(req)).toBeUndefined()
-    setAuthNote(req, 'invalid_token')
-    expect(authNoteFor(req)).toBe('invalid_token')
-    expect(authNoteFor({})).toBeUndefined()
-  })
-
-  it('terminal vs transient refresh errors', () => {
-    expect(isTerminalRefreshError({ code: 'refresh_token_not_found' })).toBe(true)
-    expect(isTerminalRefreshError({ code: 'refresh_token_already_used' })).toBe(true)
-    expect(isTerminalRefreshError({ name: 'AuthSessionMissingError' })).toBe(true)
-    expect(isTerminalRefreshError({ status: 400 })).toBe(true)
-    expect(isTerminalRefreshError({ status: 429 })).toBe(false) // rate limited: retry later, do NOT sign out
-    expect(isTerminalRefreshError({ status: 408 })).toBe(false)
-    expect(isTerminalRefreshError({ status: 503 })).toBe(false)
-    expect(isTerminalRefreshError({ name: 'AuthRetryableFetchError' })).toBe(false)
-    expect(isTerminalRefreshError(null)).toBe(false)
-  })
-
-  it('getIdentity wiring: no-token guest is silent unless the browser expected an account; invalid token → labelled guest, not 401', () => {
-    const src = fs.readFileSync(path.join(root, 'src/lib/server/auth.ts'), 'utf8')
-    expect(src).toMatch(/EXPECT_ACCOUNT_HEADER\) === '1' \? labelledGuest\(req, 'missing_token'\)/)
-    expect(src).toMatch(/labelledGuest\(req, v\.status === 'invalid' \? 'invalid_token' : 'auth_unavailable'\)/)
-    // With guest mode off, an unreachable auth service is a 503 (thrown), never a silent downgrade.
-    expect(src).toMatch(/throw new Error\('auth_unavailable'\)/)
-  })
-
-  it('every client request goes through authedFetch (retry once, never loop)', () => {
-    const src = fs.readFileSync(path.join(root, 'src/lib/client/api.ts'), 'utf8')
+  it('every client request goes through authedFetch, which sends the cookie and the optional local secrets and NEVER retries', () => {
+    const src = read('src/lib/client/api.ts')
     expect(src).not.toMatch(/\bfetch\('\/api/)
-    expect(src).toMatch(/await recoverAuth\(note, first\.token\)/)
-    expect(src).toMatch(/return \(await send\(\)\)\.res/) // exactly one retry
+    expect(src).not.toMatch(/authorization|Bearer|refreshSession|recoverAuth|x-revoice-expect-account/)
+    expect(src).toMatch(/credentials: 'same-origin'/)
+  })
+
+  it('the old auth modules and routes are gone', () => {
+    for (const f of ['src/lib/server/auth-note.ts', 'src/lib/auth-providers.ts', 'src/lib/client/supabase.ts', 'src/components/AuthControls.tsx', 'src/lib/prefs-sync.ts']) {
+      expect(fs.existsSync(path.join(root, f)), f).toBe(false)
+    }
+  })
+
+  it('no source file imports or mentions a sign-in provider, token or account tier', () => {
+    const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]))
+    const strip = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+    const offenders: string[] = []
+    for (const f of walk(path.join(root, 'src')).filter((x) => /\.(ts|tsx)$/.test(x))) {
+      const code = strip(fs.readFileSync(f, 'utf8'))
+      if (/signInWith|signOut|onAuthStateChange|getSession\(|auth\.getUser|requireAccount|account_required|AuthControls|isGuest|kind: 'guest'|'local-demo'|is_anonymous|@supabase\/ssr/.test(code)) offenders.push(path.relative(root, f))
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('the browser bundle never imports the Supabase client (the database is server-side only)', () => {
+    const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]))
+    const clientFiles = walk(path.join(root, 'src')).filter((f) => /\.(ts|tsx)$/.test(f) && /^['"]use client['"]/.test(fs.readFileSync(f, 'utf8')))
+    expect(clientFiles.length).toBeGreaterThan(5)
+    for (const f of clientFiles) expect(fs.readFileSync(f, 'utf8'), f).not.toMatch(/@supabase\/supabase-js/)
+    const pkg = JSON.parse(read('package.json'))
+    expect(pkg.dependencies['@supabase/ssr']).toBeUndefined()
+  })
+
+  it('NEXT_PUBLIC_SUPABASE_* is not needed by the browser and the CSP no longer allows Supabase origins', async () => {
+    const { buildCsp } = await import('@/lib/csp')
+    expect(buildCsp({ livekitUrl: 'wss://x.livekit.cloud' })).not.toMatch(/supabase/)
+    expect(read('.env.example')).not.toMatch(/NEXT_PUBLIC_SUPABASE|ANON_KEY|OAUTH|GITHUB|GOOGLE/i)
   })
 })
 
@@ -197,15 +95,13 @@ describe('D #35 — replace never silently ends another device\'s session', () =
 })
 
 // ---------------------------------------------------------------------------------------------- #36
-describe('D #36 — signing out ends the listening session', () => {
+describe('D #36 (superseded) — there is no Sign out to leave a billed session running', () => {
   const src = fs.readFileSync(path.join(root, 'src/components/ReVoiceApp.tsx'), 'utf8')
-  const auth = fs.readFileSync(path.join(root, 'src/components/AuthControls.tsx'), 'utf8')
-  it('Sign out ends the session FIRST (token still valid), then drops the account', () => {
-    expect(auth).toMatch(/await onBeforeSignOut\?\.\(\)[\s\S]*await sb\.auth\.signOut\(\)/)
-    expect(src).toMatch(/onBeforeSignOut=\{async \(\) => \{ await endSessionRef\.current\?\.\('user'\); setSessionTicket\(null\) \}\}/)
+  it('the header has no sign-in / sign-out control', () => {
+    expect(src).not.toMatch(/AuthControls|onBeforeSignOut|Sign out|Sign in/)
   })
-  it('SIGNED_OUT from any source (other tab, dead session) is a safety net that ends the session', () => {
-    expect(src).toMatch(/event === 'SIGNED_OUT' && sessionRef\.current\) void endSessionRef\.current\?\.\('user'\)/)
+  it('a listening session still ends on page hide / explicit end, and settles by ticket (unchanged)', () => {
+    expect(src).toMatch(/endSession/)
   })
 })
 

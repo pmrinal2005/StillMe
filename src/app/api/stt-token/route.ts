@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { reserveSttSpend } from '@/lib/server/spend'
 import { signSessionTicket } from '@/lib/session-ticket'
@@ -27,8 +27,6 @@ const Body = z.object({
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'listening'); if (gate) return gate }
   if (!env.allowBrowserStt()) return json({ error: 'browser_stt_disabled' }, 403)
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)

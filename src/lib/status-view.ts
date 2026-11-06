@@ -1,26 +1,24 @@
 /**
  * B18 — what /api/status may reveal.
  *
- * Bug: /api/status answered ANY caller (including an anonymous guest) with the caller's internal user id, the
+ * Bug: /api/status answered ANY caller with the caller's internal user id, the
  * project-wide budget (how much of the shared AssemblyAI credit is left, lifetime and spendable USD), every cap, the
  * spend-store schema mode, the approval-secret SOURCE (tells an attacker which provider secret derives the HMAC key)
  * and the Groq model. That is reconnaissance material for anyone who opens the site.
  *
  * Now: the public view is the minimum the UI needs to render (feature flags, region, the CALLER's own daily meters and
- * the session length cap, identity KIND only — no user id). Everything operational lives under `operator`, present
- * only for an operator (fail-closed allowlist, see auth.ts isOperator).
+ * the session length cap — no user id). Everything operational lives under `operator`, present
+ * only for an operator (fail-closed token, see auth.ts isOperator).
  */
 import type { BudgetLedger } from './budget'
 
 type BudgetSnapshot = ReturnType<BudgetLedger['snapshot']>
 
 export interface PublicStatus {
-  identity: { kind: 'supabase' | 'local-demo' | 'guest' }
   providers: {
     assemblyai: boolean
     groq: boolean
     livekit: boolean
-    supabase: boolean
     durableStore: boolean
     browserStt: boolean
     phoneInbound: boolean

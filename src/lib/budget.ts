@@ -62,19 +62,14 @@ export type SttProfile = 'flagship' | 'economy'
 export const sttRatePerHour = (p: SttProfile | undefined | null): number => (p === 'economy' ? PRICES.sttEconomyPerHour : PRICES.sttFlagshipPerHour)
 
 /**
- * B8: guest limits (Supabase configured but visitor not signed in). Guests may type and speak with
- * library voices and receive suggestions, within much smaller caps. Listening sessions, cloned
- * voices, phone and reconciliation still require a real account.
+ * NO SIGN-IN: there are no accounts, so every visitor is a device. Each device gets the normal per-device LIMITS, and all
+ * devices behind the same network (HMAC of the client IP) share ONE pool, so clearing cookies / opening a private window
+ * cannot mint a fresh allowance. The pool is 1.5x one device (a household can share it) and stays below the project-wide
+ * PROJECT_LIMITS (2x), which still bound the sum of everybody.
  */
-export const GUEST_LIMITS: Limits = {
-  groq: { ...LIMITS.groq, requestsPerDay: 30, dailyTokens: 20_000, requestsPerMinute: 4 },
-  assembly: { ...LIMITS.assembly, dailyTtsChars: 1_000, dailyUsd: 0.05, interactiveSessionMinutes: 0, dailyFlagshipListeningMinutes: 0 },
-  livekit: { ...LIMITS.livekit },
-}
-/** Shared pool across ALL guests on an instance (clearing cookies does not grant more). */
-export const GUEST_POOL_LIMITS: Limits = {
+export const NETWORK_POOL_LIMITS: Limits = {
   groq: { ...LIMITS.groq, requestsPerDay: 120, dailyTokens: 60_000, requestsPerMinute: 6, outstandingPerConversation: 4, callsPerPartnerTurn: 2 },
-  assembly: { ...LIMITS.assembly, dailyTtsChars: 4_000, dailyUsd: 0.1, interactiveSessionMinutes: 0, dailyFlagshipListeningMinutes: 0 },
+  assembly: { ...LIMITS.assembly, dailyTtsChars: LIMITS.assembly.dailyTtsChars * 1.5, dailyUsd: LIMITS.assembly.dailyUsd * 1.5, dailyFlagshipListeningMinutes: LIMITS.assembly.dailyFlagshipListeningMinutes * 1.5 },
   livekit: { ...LIMITS.livekit },
 }
 

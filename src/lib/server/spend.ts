@@ -2,15 +2,15 @@ import 'server-only'
 /**
  * A-series spend control (critical budget fixes). One place that reserves money against EVERY layer:
  *
- *   in-memory user ledger ∩ in-memory project ledger ∩ in-memory guest pool (fast pre-checks, per instance)
- *   ∩ DURABLE Supabase reservation (cross-instance source of truth: subject ∩ guest pool ∩ project ∩ reserve)
+ *   in-memory device ledger ∩ in-memory project ledger ∩ in-memory NETWORK pool (fast pre-checks, per instance)
+ *   ∩ DURABLE Supabase reservation (cross-instance source of truth: device ∩ network pool ∩ project ∩ reserve)
  *
  * Fixes:
  *  A1  worker speech is reserved at approval time (ref = approval id) and settled by the worker.
- *  A5  guests get a durable subject (HMAC of client IP, else device id) + a durable shared guest pool.
+ *  A5  every device has a durable subject (its uuid) and shares a durable per-NETWORK pool (HMAC of client IP).
  *  A6  Groq requests/tokens are reserved durably (daily request count + token caps).
  *  A7  browser-direct STT reserves durably with a ref and is settled on end; every failure path releases.
- *  A8  every release path releases EVERY layer (the guest pool was forgotten before).
+ *  A8  every release path releases EVERY layer (including the network pool).
  *  A9  consent renewal reserves against user ∩ project ∩ durable.
  *  A3/A10 STT reservations carry ref = room, so the worker's measured usage settles them on any instance,
  *      and unsettled rows are swept lazily inside reserve_budget_v3.
@@ -20,8 +20,8 @@ import 'server-only'
 import type { Identity } from './auth'
 import { adminClient } from './durable'
 import { env } from './env'
-import { ledgerFor, projectLedger, guestPoolLedger } from './state'
-import { GUEST_LIMITS, GUEST_POOL_LIMITS, LIMITS, PRICES, PROJECT_LIMITS, sttRatePerHour, type DenyReason, type SttProfile } from '../budget'
+import { ledgerFor, projectLedger, networkPoolLedger } from './state'
+import { LIMITS, NETWORK_POOL_LIMITS, PRICES, PROJECT_LIMITS, sttRatePerHour, type DenyReason, type SttProfile } from '../budget'
 import { hmacSha256Hex } from '../hash'
 
 export type SpendProvider = 'assemblyai_tts' | 'assemblyai_stt' | 'groq'
@@ -30,8 +30,10 @@ const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 
 export interface DurableSubject {
   subject: string
-  user: string | null
-  pool: 'guest' | null
+  /** Always null: devices are not auth users, so the durable rows must not depend on the auth.users foreign key. */
+  user: null
+  /** Per-network pool (`net:<hash of client IP>`). Null only when the caller has no usable network identity. */
+  pool: string | null
 }
 
 /** Client IP as seen by Vercel's edge (first x-forwarded-for hop), else x-real-ip. */
@@ -45,18 +47,18 @@ export function clientIp(req: Request): string | null {
 }
 
 /**
- * A5: durable spending subject. Signed-in users → their uuid. Guests → HMAC(client IP) so clearing cookies
- * does NOT mint a fresh allowance (falls back to the device id only when no IP header exists), and every
- * guest also draws from the shared durable 'guest' pool.
+ * NO SIGN-IN: the spending subject is the DEVICE (its deterministic uuid), and every device also draws from a shared
+ * per-NETWORK pool keyed by an HMAC of the client IP. Clearing cookies mints a new device but lands in the SAME network
+ * pool, so it cannot mint a fresh allowance; the project-wide caps bound the sum of everybody. (This replaces the old
+ * guest pool: with no accounts, every visitor is subject to it.)
  */
+export async function networkPoolKey(req: Request): Promise<string> {
+  const ip = clientIp(req) ?? 'no-ip'
+  return `net:${(await hmacSha256Hex(env.approvalSecret(), `network-pool:${ip}`)).slice(0, 32)}`
+}
+
 export async function durableSubject(id: Identity, req: Request): Promise<DurableSubject> {
-  if (id.kind === 'supabase' && isUuid(id.userId)) return { subject: id.userId, user: id.userId, pool: null }
-  if (id.kind === 'guest') {
-    const ip = clientIp(req)
-    const key = ip ? `ip:${ip}` : `dev:${id.userId}`
-    return { subject: `guest:${(await hmacSha256Hex(env.approvalSecret(), `guest-subject:${key}`)).slice(0, 32)}`, user: null, pool: 'guest' }
-  }
-  return { subject: `demo:${id.userId}`.slice(0, 96), user: null, pool: null }
+  return { subject: id.userId, user: null, pool: await networkPoolKey(req) }
 }
 
 interface Caps {
@@ -72,31 +74,31 @@ interface Caps {
 }
 
 /**
- * Durable caps for one reservation. Mirrors the in-memory LIMITS / GUEST_LIMITS / GUEST_POOL_LIMITS / PROJECT_LIMITS.
+ * Durable caps for one reservation. Mirrors the in-memory LIMITS / NETWORK_POOL_LIMITS / PROJECT_LIMITS.
  * E47: the PROJECT caps come from PROJECT_LIMITS (the sum of everyone), the SUBJECT caps from the per-user limits.
  * They used to be `LIMITS.assembly.dailyUsd` for both, so a single account could spend the whole project's day.
  */
-export function durableCaps(provider: SpendProvider, guest: boolean): Caps {
-  const L = guest ? GUEST_LIMITS : LIMITS
-  const P = GUEST_POOL_LIMITS
+export function durableCaps(provider: SpendProvider, pooled: boolean): Caps {
+  const L = LIMITS
+  const P = NETWORK_POOL_LIMITS
   const J = PROJECT_LIMITS
   switch (provider) {
     case 'assemblyai_tts':
       return {
         subjectUnits: L.assembly.dailyTtsChars, subjectUsd: L.assembly.dailyUsd, subjectCount: null,
-        poolUnits: guest ? P.assembly.dailyTtsChars : null, poolUsd: guest ? P.assembly.dailyUsd : null, poolCount: null,
+        poolUnits: pooled ? P.assembly.dailyTtsChars : null, poolUsd: pooled ? P.assembly.dailyUsd : null, poolCount: null,
         projectUnits: J.assembly.dailyTtsChars, projectUsd: J.assembly.dailyUsd, projectCount: null,
       }
     case 'assemblyai_stt':
       return {
         subjectUnits: L.assembly.dailyFlagshipListeningMinutes, subjectUsd: L.assembly.dailyUsd, subjectCount: null,
-        poolUnits: guest ? 0 : null, poolUsd: guest ? P.assembly.dailyUsd : null, poolCount: null,
+        poolUnits: pooled ? P.assembly.dailyFlagshipListeningMinutes : null, poolUsd: pooled ? P.assembly.dailyUsd : null, poolCount: null,
         projectUnits: J.assembly.dailyFlagshipListeningMinutes, projectUsd: J.assembly.dailyUsd, projectCount: null,
       }
     case 'groq':
       return {
         subjectUnits: L.groq.dailyTokens, subjectUsd: null, subjectCount: L.groq.requestsPerDay,
-        poolUnits: guest ? P.groq.dailyTokens : null, poolUsd: null, poolCount: guest ? P.groq.requestsPerDay : null,
+        poolUnits: pooled ? P.groq.dailyTokens : null, poolUsd: null, poolCount: pooled ? P.groq.requestsPerDay : null,
         projectUnits: J.groq.dailyTokens, projectUsd: null, projectCount: J.groq.requestsPerDay,
       }
   }
@@ -120,7 +122,7 @@ export function isMissingFunction(err: { code?: string; message?: string } | nul
 
 /**
  * Durable store schema mode, cached per instance.
- *  'v3'      migration 0003 applied (subjects, guest pool, refs, request counts, sweep, agent minutes)
+ *  'v3'      migration 0003 applied (subjects, network pool, refs, request counts, sweep, agent minutes)
  *  'legacy'  only 0001/0002 applied → reserve_budget/settle_budget (project-wide + per-user caps)
  *
  * REGRESSION FIX: the deployed site has no 0003 yet; failing closed on the missing RPC turned every
@@ -144,10 +146,10 @@ export function setStoreMode(mode: 'v3' | 'legacy' | null) {
 async function reserveLegacy(s: DurableSubject, provider: SpendProvider, units: number, profile?: SttProfile | null): Promise<DurableResult> {
   const sb = adminClient()
   if (!sb) return null
-  const c = durableCaps(provider, s.pool === 'guest')
+  const c = durableCaps(provider, s.pool !== null)
   const big = 1e12
   const { data, error } = await sb.rpc('reserve_budget', {
-    p_user: s.user, // null for guests/demo → only project-wide caps apply durably
+    p_user: s.user, // always null (devices are not auth users) → only project-wide caps apply durably
     p_provider: provider,
     p_units: units,
     p_est_usd: estUsd(provider, units, profile),
@@ -171,7 +173,7 @@ export async function reserveDurableV3(s: DurableSubject, provider: SpendProvide
   const sb = adminClient()
   if (!sb) return null
   if (knownStoreMode() === 'legacy') return reserveLegacy(s, provider, units, profile)
-  const c = durableCaps(provider, s.pool === 'guest')
+  const c = durableCaps(provider, s.pool !== null)
   const args: Record<string, unknown> = {
     p_subject: s.subject,
     p_user: s.user,
@@ -255,7 +257,7 @@ export async function recordAgentMinutes(owner: string, room: string, minutes: n
   const sb = adminClient()
   if (!sb) return
   await sb
-    .rpc('record_agent_minutes', { p_subject: owner, p_user: isUuid(owner) ? owner : null, p_ref: room, p_units: Math.max(0, Math.ceil(minutes)) })
+    .rpc('record_agent_minutes', { p_subject: owner, p_user: null, p_ref: room, p_units: Math.max(0, Math.ceil(minutes)) })
     .then(() => undefined, () => undefined)
 }
 
@@ -279,15 +281,16 @@ export interface TtsHandle {
   commit(billedChars?: number): Promise<void>
   /** Commit only the in-memory ledgers (full chars); the durable row stays reserved for the worker (A1). */
   commitMemoryOnly(): void
-  /** Release EVERY layer (memory user, project, guest pool, durable) — A8. */
+  /** Release EVERY layer (memory device, project, network pool, durable) — A8. */
   release(): Promise<void>
 }
 
-const denyOf = (reason: DenyReason | string, extra: Record<string, unknown> = {}, unavailable = false): Deny => ({
-  ok: false,
-  status: unavailable ? 503 : 429,
-  body: { error: unavailable ? reason : 'budget', reason, ...extra },
-})
+/** The SQL functions (migration 0003) name the shared-pool refusal `guest_pool`; with no accounts it is the NETWORK pool. */
+const normalizeReason = (r: string) => (r === 'guest_pool' ? 'network_pool' : r)
+const denyOf = (reason: DenyReason | string, extra: Record<string, unknown> = {}, unavailable = false): Deny => {
+  const r = normalizeReason(reason)
+  return { ok: false, status: unavailable ? 503 : 429, body: { error: unavailable ? r : 'budget', reason: r, ...extra } }
+}
 
 export async function reserveTtsSpend(id: Identity, req: Request, chars: number, ref: string | null = null): Promise<TtsHandle | Deny> {
   const user = ledgerFor(id.userId).reserveTts(chars)
@@ -297,22 +300,23 @@ export async function reserveTtsSpend(id: Identity, req: Request, chars: number,
     ledgerFor(id.userId).releaseTts(user.id)
     return denyOf(proj.reason)
   }
-  const pool = id.kind === 'guest' ? guestPoolLedger().reserveTts(chars) : null
-  if (pool && !pool.ok) {
+  const netKey = await networkPoolKey(req)
+  const pool = networkPoolLedger(netKey).reserveTts(chars)
+  if (!pool.ok) {
     ledgerFor(id.userId).releaseTts(user.id)
     projectLedger().releaseTts(proj.id)
-    return denyOf('guest_pool', { message: 'Guest voice allowance is used up for today. Sign in for more.' })
+    return denyOf('network_pool', { message: 'This network’s voice allowance is used up for today. Try again tomorrow, or type and use your phrase boards.' })
   }
-  const poolId = pool?.ok ? pool.id : undefined
+  const poolId = pool.id
   const releaseMemory = () => {
     ledgerFor(id.userId).releaseTts(user.id)
     projectLedger().releaseTts(proj.id)
-    if (poolId) guestPoolLedger().releaseTts(poolId)
+    networkPoolLedger(netKey).releaseTts(poolId)
   }
   const d = await reserveDurableV3(await durableSubject(id, req), 'assemblyai_tts', chars, ref)
   if (d && !d.ok) {
     releaseMemory()
-    return denyOf(d.reason, d.reason === 'guest_pool' ? { message: 'Guest voice allowance is used up for today. Sign in for more.' } : {}, d.unavailable)
+    return denyOf(d.reason, d.reason === 'network_pool' ? { message: 'This network’s voice allowance is used up for today.' } : {}, d.unavailable)
   }
   const durableId = d?.ok ? d.id : null
   let done = false
@@ -325,14 +329,14 @@ export async function reserveTtsSpend(id: Identity, req: Request, chars: number,
       done = true
       ledgerFor(id.userId).commitTts(user.id)
       projectLedger().commitTts(proj.id)
-      if (poolId) guestPoolLedger().commitTts(poolId)
+      networkPoolLedger(netKey).commitTts(poolId)
     },
     async commit(billed) {
       if (done) return
       done = true
       ledgerFor(id.userId).commitTts(user.id, billed)
       projectLedger().commitTts(proj.id, billed)
-      if (poolId) guestPoolLedger().commitTts(poolId, billed)
+      networkPoolLedger(netKey).commitTts(poolId, billed)
       await settleDurableId(durableId, 'assemblyai_tts', true, billed ?? chars)
     },
     async release() {
@@ -350,7 +354,7 @@ export async function reserveGroqDurable(id: Identity, req: Request, tokens: num
   const d = await reserveDurableV3(await durableSubject(id, req), 'groq', tokens, null)
   if (d && !d.ok) {
     const map: Record<string, string> = { user_daily_units: 'groq_daily_tokens', user_daily_requests: 'groq_rpd', project_daily_units: 'groq_daily_tokens', project_daily_requests: 'groq_rpd' }
-    return denyOf(map[d.reason] ?? d.reason, d.reason === 'guest_pool' ? { message: 'Guest suggestion allowance is used up. Sign in for more.' } : {}, d.unavailable)
+    return denyOf(map[d.reason] ?? d.reason, d.reason === 'network_pool' ? { message: 'This network’s suggestion allowance is used up for today.' } : {}, d.unavailable)
   }
   return { ok: true, durableId: d?.ok ? d.id : null }
 }

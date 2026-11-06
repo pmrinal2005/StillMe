@@ -16,6 +16,7 @@
  * Checks (deployed app, when REVOICE_BASE_URL is set):
  *   4. approve -> speak streams PCM; replay is rejected (409); altered text is rejected (409)
  *   5. an unapproved cloned voice is refused (403); malformed bodies get JSON errors
+ *   6. no sign-in anywhere: an anonymous device cookie is issued, device keys round-trip, forged keys are refused
  */
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -120,9 +121,12 @@ if (BASE) {
     return res
   }
   const sha = (t) => createHash('sha256').update(t.normalize('NFC')).digest('hex')
-  const st = await (await call('/api/status')).json()
-  if (st.identity) ok('identity resolved', st.identity.kind)
-  else bad('status', JSON.stringify(st).slice(0, 120))
+  const stRes = await call('/api/status')
+  const st = await stRes.json()
+  // NO SIGN-IN: the first call mints an anonymous, signed, HttpOnly device cookie. There is nothing to log in to.
+  stRes.ok && st.providers ? ok('status served with no sign-in') : bad('status', `HTTP ${stRes.status} ${JSON.stringify(st).slice(0, 120)}`)
+  cookie.startsWith('rv_device=') ? ok('anonymous device cookie issued') : bad('device cookie missing', cookie.slice(0, 40))
+  st.identity === undefined && st.operator === undefined ? ok('status exposes no identity or operator data') : bad('status leaks identity/operator data')
   st.providers?.assemblyai ? ok('server has AssemblyAI configured') : bad('server missing ASSEMBLYAI_API_KEY')
   st.providers?.approvalSecretConfigured ? ok('stable approval secret', st.providers.approvalSecretSource) : bad('approval secret unstable')
 
@@ -148,14 +152,14 @@ if (BASE) {
     alt.status === 409 ? ok('altered text rejected') : bad('altered text should be 409', `HTTP ${alt.status}`)
   }
   const clone = await call('/api/approve', { text: 'Test', textHash: sha('Test'), conversationId: 'smoke-c', generation: 0, voiceId: 'unregistered-clone', outputLanguage: 'english' })
-  // 403 voice_not_authorized (signed in) or 401 account_required (guest, B8) are both correct refusals.
-  const cb = await clone.json().catch(() => ({}))
-  clone.status === 403 || (clone.status === 401 && cb.error === 'account_required') ? ok('unregistered cloned voice refused', `HTTP ${clone.status} ${cb.error ?? ''}`) : bad('clone should be refused', `HTTP ${clone.status}`)
-  if (st.identity?.kind === 'guest') {
-    const ls = await call('/api/livekit/session', {})
-    const lb = await ls.json().catch(() => ({}))
-    ls.status === 401 && lb.error === 'account_required' ? ok('guest cannot start a billed listening session') : bad('guest listening should be refused', `HTTP ${ls.status}`)
-  }
+  // A cloned voice id alone never grants use: it must be registered to THIS device identity.
+  clone.status === 403 ? ok('unregistered cloned voice refused', `HTTP ${clone.status}`) : bad('clone should be refused', `HTTP ${clone.status}`)
+  const sess = await call('/api/livekit/session', {})
+  sess.status !== 401 ? ok('listening session route does not demand sign-in', `HTTP ${sess.status}`) : bad('listening session still demands sign-in')
+  const key = await (await call('/api/device')).json().catch(() => ({}))
+  ;/^[0-9a-f]{32}\.[0-9a-f]{64}$/.test(key.key ?? '') ? ok('device key available for backup') : bad('device key', JSON.stringify(key).slice(0, 80))
+  const forged = await call('/api/device', { key: '0'.repeat(32) + '.' + '0'.repeat(64) })
+  forged.status === 400 ? ok('forged device key refused') : bad('forged device key should be 400', `HTTP ${forged.status}`)
   const junk = await call('/api/speak', 'not json')
   const jb = await junk.json().catch(() => null)
   junk.status === 400 && jb?.error ? ok('malformed body -> JSON error') : bad('malformed body', `HTTP ${junk.status}`)

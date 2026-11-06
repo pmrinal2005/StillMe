@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { deleteRoom } from '@/lib/server/livekit'
 import { settleLocalStt } from '@/lib/server/state'
@@ -34,7 +34,6 @@ const Body = z.object({
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
   const { room, reason } = parsed.data

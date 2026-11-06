@@ -2,8 +2,7 @@
  * E50: Content-Security-Policy. Pure (no `server-only`) so next.config.ts and the tests share it.
  *
  * What the app legitimately talks to:
- *   - itself;  Google Fonts (CSS + font files);
- *   - Supabase (REST/auth over https, Realtime over wss) — the project host is read from NEXT_PUBLIC_SUPABASE_URL;
+ *   - itself (the browser never talks to Supabase: it is a server-side store only);  Google Fonts (CSS + font files);
  *   - LiveKit (wss signalling + https) — the host from LIVEKIT_URL, plus *.livekit.cloud as a safe default;
  *   - AssemblyAI streaming STT (browser-direct demo mode) over wss, US and EU zones;
  *   - blob: for the capture AudioWorklet (script-src governs addModule) and for message-bank / export blobs; data: for icons.
@@ -19,15 +18,10 @@ function hostOf(u: string | undefined): string | null {
   }
 }
 
-export function buildCsp(opts: { dev?: boolean; supabaseUrl?: string; livekitUrl?: string } = {}): string {
-  const sb = hostOf(opts.supabaseUrl)
+export function buildCsp(opts: { dev?: boolean; livekitUrl?: string } = {}): string {
   const lk = hostOf(opts.livekitUrl?.replace(/^wss?:/, 'https:'))
   const connect = [
     "'self'",
-    sb ? `https://${sb}` : null,
-    sb ? `wss://${sb}` : null,
-    'https://*.supabase.co',
-    'wss://*.supabase.co',
     lk ? `https://${lk}` : null,
     lk ? `wss://${lk}` : null,
     'https://*.livekit.cloud',

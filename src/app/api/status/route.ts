@@ -1,4 +1,4 @@
-import { getIdentity, isOperator, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, isOperator, json } from '@/lib/server/auth'
 import { env, providerStatus } from '@/lib/server/env'
 import { ledgerFor, projectLedger } from '@/lib/server/state'
 import { LIMITS } from '@/lib/budget'
@@ -16,15 +16,13 @@ export const dynamic = 'force-dynamic'
  */
 async function handleGET(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
+  const operator = await isOperator(req)
   const p = providerStatus()
   const body: PublicStatus = {
-    identity: { kind: id.kind },
     providers: {
       assemblyai: p.assemblyai,
       groq: p.groq,
       livekit: p.livekit,
-      supabase: p.supabase,
       durableStore: p.durableStore,
       browserStt: p.browserStt,
       phoneInbound: p.phoneInbound,
@@ -36,7 +34,7 @@ async function handleGET(req: Request) {
       limits: { assembly: { interactiveSessionMinutes: LIMITS.assembly.interactiveSessionMinutes }, livekit: { monthlyInboundPhoneMinutes: LIMITS.livekit.monthlyInboundPhoneMinutes } },
     },
   }
-  if (isOperator(id)) {
+  if (operator) {
     body.operator = {
       userId: id.userId,
       providers: { approvalSecretSource: p.approvalSecretSource, groqModel: p.groqModel, region: env.assemblyRegion() },

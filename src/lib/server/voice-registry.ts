@@ -133,6 +133,9 @@ const iso = (ms: number) => new Date(ms).toISOString()
 
 /** Schema problems (migration 0004 not applied) must fail CLOSED and say so — never silently allow a clone. */
 function dbFail(err: { code?: string; message?: string } | null): never {
+  if (err && err.code === '23503') {
+    throw new VoiceRegistryError('voice_registry_migration_required', 503, 'Apply supabase/migrations/0007_no_signin.sql to enable cloned voices (device ids are not auth users).')
+  }
   if (err && (err.code === '42703' || err.code === 'PGRST204' || err.code === '42P01' || err.code === 'PGRST205' || /column .* does not exist|schema cache/i.test(err.message ?? ''))) {
     throw new VoiceRegistryError('voice_registry_migration_required', 503, 'Apply supabase/migrations/0004_security_consent.sql to enable cloned voices.')
   }
@@ -223,14 +226,6 @@ export function voiceStoreFor(userId: string): VoiceStore {
 }
 
 // ------------------------------------------------------------------------------------------------ registry logic
-/** REVOICE_CLONE_REGISTRANTS (optional): only these user ids / verified e-mails may bind a clone id to an account. */
-export function mayRegisterClone(id: { userId: string; email?: string; emailVerified?: boolean }): boolean {
-  const list = env.cloneRegistrants()
-  if (!list.length) return true
-  if (list.includes(id.userId.toLowerCase())) return true
-  return !!id.email && !!id.emailVerified && list.includes(id.email.toLowerCase())
-}
-
 export interface RegisterInput {
   voiceId: string
   label: string
@@ -317,15 +312,14 @@ export async function persistProviderExpiry(store: VoiceStore, userId: string, p
 export type VoiceAuth =
   | { ok: true; kind: 'library' }
   | { ok: true; kind: 'cloned'; profile: ClonedVoiceProfile; remindRenewal: boolean; expiresAt: number }
-  | { ok: false; reason: 'not_registered' | 'revoked' | 'expired' | 'incomplete_consent' | 'region_mismatch' | 'account_required' }
+  | { ok: false; reason: 'not_registered' | 'revoked' | 'expired' | 'incomplete_consent' | 'region_mismatch' }
 
 /**
  * THE authorization decision for a voice id. Library voices are open to everyone; a cloned voice is usable only by
- * the account that registered it, with complete unrevoked unexpired consent in the server's data zone.
+ * the DEVICE identity that registered it, with complete unrevoked unexpired consent in the server's data zone.
  */
-export async function authorizeVoice(store: VoiceStore, id: { userId: string; kind: 'supabase' | 'local-demo' | 'guest' }, voiceId: string, region: 'us' | 'eu', now = Date.now()): Promise<VoiceAuth> {
+export async function authorizeVoice(store: VoiceStore, id: { userId: string }, voiceId: string, region: 'us' | 'eu', now = Date.now()): Promise<VoiceAuth> {
   if (isLibraryVoice(voiceId)) return { ok: true, kind: 'library' }
-  if (id.kind === 'guest') return { ok: false, reason: 'account_required' }
   const p = await store.get(id.userId, voiceId)
   if (!p) return { ok: false, reason: 'not_registered' }
   const u = clonedVoiceUsable(p, region, now)

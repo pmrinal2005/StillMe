@@ -1,9 +1,9 @@
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
-import { guestPoolLedger, ledgerFor, projectLedger, recordCandidates, recordTurn } from '@/lib/server/state'
+import { getIdentity, json } from '@/lib/server/auth'
+import { ledgerFor, networkPoolLedger, projectLedger, recordCandidates, recordTurn } from '@/lib/server/state'
 import { generateCandidates, GroqError, buildMessages } from '@/lib/server/groq'
 import { CandidateSet, SuggestRequest } from '@/lib/contracts'
 import { estimateTokens, LIMITS } from '@/lib/budget'
-import { reserveGroqDurable, settleDurableId } from '@/lib/server/spend'
+import { networkPoolKey, reserveGroqDurable, settleDurableId } from '@/lib/server/spend'
 import { randomId, sha256Hex } from '@/lib/hash'
 import { withJsonErrors } from '@/lib/server/route'
 import { env } from '@/lib/server/env'
@@ -17,7 +17,6 @@ const CANDIDATE_TTL_MS = 90_000
 
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
   const parsed = SuggestRequest.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request', issues: parsed.error.issues.slice(0, 5) }, 400)
   const body = parsed.data
@@ -44,24 +43,25 @@ async function handlePOST(req: Request) {
       ledgerFor(id.userId).releaseGroq(u.id)
       return json({ error: 'budget', reason: p.reason, retryAfterMs: p.retryAfterMs }, 429)
     }
-    // B8: guests also draw from one shared guest pool.
-    const gpool = id.kind === 'guest' ? guestPoolLedger().reserveGroq({ conversationId: `${id.userId}:${body.turn.conversationId}`, turnKey: `${id.userId}:${turnKey}`, inputTokens }) : null
-    if (gpool && !gpool.ok) {
+    // NO SIGN-IN: every device also draws from one shared per-NETWORK pool, so clearing cookies mints no new allowance.
+    const netKey = await networkPoolKey(req)
+    const npool = networkPoolLedger(netKey).reserveGroq({ conversationId: `${id.userId}:${body.turn.conversationId}`, turnKey: `${id.userId}:${turnKey}`, inputTokens })
+    if (!npool.ok) {
       ledgerFor(id.userId).releaseGroq(u.id)
       projectLedger().releaseGroq(p.id)
-      return json({ error: 'budget', reason: 'guest_pool', retryAfterMs: gpool.retryAfterMs, message: 'Guest suggestion allowance is used up. Sign in for more.' }, 429)
+      return json({ error: 'budget', reason: 'network_pool', retryAfterMs: npool.retryAfterMs, message: 'This network’s suggestion allowance is used up for today. You can still type and speak.' }, 429)
     }
-    const gpoolId = gpool?.ok ? gpool.id : undefined
+    const npoolId = npool.id
     const releaseMemory = (refundTurn = false) => {
       ledgerFor(id.userId).releaseGroq(u.id, { refundTurn })
       projectLedger().releaseGroq(p.id, { refundTurn })
-      if (gpoolId) guestPoolLedger().releaseGroq(gpoolId, { refundTurn })
+      networkPoolLedger(netKey).releaseGroq(npoolId, { refundTurn })
     }
     /** Abandoned before Groq answered: give EVERYTHING back (slot, tokens, request count, per-turn call). */
     const refundMemory = () => {
       ledgerFor(id.userId).refundGroq(u.id)
       projectLedger().refundGroq(p.id)
-      if (gpoolId) guestPoolLedger().refundGroq(gpoolId)
+      networkPoolLedger(netKey).refundGroq(npoolId)
     }
 
     // A5/A6: DURABLE Groq reservation (daily requests + tokens per subject ∩ guest pool ∩ project). The in-memory
@@ -77,7 +77,7 @@ async function handlePOST(req: Request) {
       const out = await generateCandidates(body, flight.signal)
       ledgerFor(id.userId).commitGroq(u.id, out.totalTokens)
       projectLedger().commitGroq(p.id, out.totalTokens)
-      if (gpoolId) guestPoolLedger().commitGroq(gpoolId, out.totalTokens)
+      networkPoolLedger(netKey).commitGroq(npoolId, out.totalTokens)
       await settleDurableId(g.durableId, 'groq', true, out.totalTokens)
       const now = Date.now()
       const set: CandidateSet = {

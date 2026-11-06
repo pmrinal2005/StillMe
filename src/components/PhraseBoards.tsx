@@ -86,9 +86,7 @@ export function PhraseBoards({ onPick, cacheAllowed = false }: { onPick: (text: 
           <h2 id="boards-h" className="rv-section-title flex items-center gap-2"><Icon name="grid" size={17} /> Phrase boards</h2>
         </div>
         <p className="rv-muted text-xs" role="status" aria-live="polite" id="phrase-sync-status">
-          {sync.state === 'synced' && 'Synced to your account'}
-          {sync.state === 'syncing' && 'Syncing…'}
-          {sync.state === 'local' && 'Saved on this device'}
+          Saved on this device
         </p>
         <button className="rv-btn text-sm" aria-pressed={editing} onClick={() => setEditing((e) => !e)}>
           <Icon name={editing ? 'check' : 'edit'} size={15} /> {editing ? 'Done editing' : 'Edit boards'}

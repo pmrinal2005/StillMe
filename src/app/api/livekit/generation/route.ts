@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { getRoomMeta, updateRoomMeta } from '@/lib/server/livekit'
 import { rv } from '@/lib/server/state'
@@ -28,8 +28,6 @@ const Body = z.object({ room: z.string().regex(ROOM_RE), ticket: z.string().max(
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'listening sessions'); if (gate) return gate }
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
   const { room } = parsed.data

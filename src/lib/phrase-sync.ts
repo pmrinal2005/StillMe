@@ -299,7 +299,7 @@ function friendly(code: string | undefined, message: string | undefined): string
   if (/board_cap/.test(message ?? '')) return `You have reached the limit of ${PHRASE_LIMITS.maxBoards} boards. Delete a board to sync new ones.`
   if (/phrase_cap/.test(message ?? '')) return `You have reached the limit of ${PHRASE_LIMITS.maxPhrases} phrases. Delete some phrases to sync new ones.`
   if (code === '42P01') return 'The phrase tables are missing on the server (run the Supabase migrations).'
-  if (code === '42501' || code === 'PGRST301') return 'You are not allowed to sync phrases (sign in again).'
+  if (code === '42501' || code === 'PGRST301') return 'Phrase sync is not available.'
   return `Phrases could not be synced (${code ?? 'error'}). They are kept on this device and will be retried.`
 }
 

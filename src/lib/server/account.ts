@@ -9,16 +9,11 @@ import { sttMinutesToCommit } from '../spend-refs'
 import type { Identity } from './auth'
 
 /**
- * B19 — a REAL account deletion.
- *
- * Bug: /api/account/delete only called forgetUser() (this instance's memory) and cleared a cookie. The Supabase auth
- * user, its rows, its open listening rooms (still billing STT), its open spend reservations and its cloned voices all
- * survived — the UI said "deleted" while the account kept working. Order matters, most dangerous first:
+ * Delete THIS DEVICE'S server-side data (there are no accounts). Order matters, most dangerous first:
  *   1. tombstone cloned voices   (a clone stops being usable even if a later step fails; nobody can re-claim its id)
  *   2. close every live room     (ends the worker, stops STT billing) and settle the room's reservation
  *   3. settle open reservations  (committed conservatively — never refunded: the provider may already have billed)
- *   4. delete user-owned rows
- *   5. delete the auth user      (LAST: until it succeeds the user can still sign in and retry)
+ *   4. delete device-owned rows
  * Each step is reported; a failed step never silently passes (`ok:false` + the step list).
  */
 export interface DeleteStep {
@@ -30,12 +25,14 @@ export interface DeleteStep {
 const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
 
 /** Tables holding rows for the user (client-owned + server-written). budget_reservations is deliberately NOT here. */
+// voice_profiles BEFORE biometric_consents: the append-only trigger (0005) refuses to delete a consent row while its voice
+// profile still exists, but allows the cascade that follows deleting the profile.
 export const USER_TABLES = [
-  'phrases', 'phrase_boards', 'style_cards', 'accessibility_prefs', 'biometric_consents', 'voice_profiles',
+  'phrases', 'phrase_boards', 'style_cards', 'accessibility_prefs', 'voice_profiles', 'biometric_consents',
   'session_members', 'conversation_sessions', 'usage_events', 'audit_events', 'approval_uses', 'phone_calls', 'phone_pair_codes', 'profiles',
 ] as const
 
-export async function deleteAccount(id: Identity): Promise<{ ok: boolean; steps: DeleteStep[]; voiceIds: string[] }> {
+export async function deleteDeviceData(id: Identity): Promise<{ ok: boolean; steps: DeleteStep[]; voiceIds: string[] }> {
   const steps: DeleteStep[] = []
   const run = async <T>(step: string, fn: () => Promise<T>): Promise<T | undefined> => {
     try {
@@ -48,12 +45,12 @@ export async function deleteAccount(id: Identity): Promise<{ ok: boolean; steps:
     }
   }
   const sb = adminClient()
-  const real = id.kind === 'supabase' && isUuid(id.userId)
+  const durable = isUuid(id.userId)
 
   // 1. voices
   let voiceIds: string[] = []
   voiceIds = (await run('tombstone_voices', async () => {
-    const store = real ? supabaseVoiceStore() ?? memoryVoiceStore() : memoryVoiceStore()
+    const store = durable ? supabaseVoiceStore() ?? memoryVoiceStore() : memoryVoiceStore()
     return store.tombstoneAll(id.userId)
   })) ?? []
 
@@ -69,43 +66,34 @@ export async function deleteAccount(id: Identity): Promise<{ ok: boolean; steps:
     })
   }
 
-  // 3 + 4 + 5 need the durable store and a real account.
-  if (sb && real) {
+  // 3 + 4 need the durable store.
+  if (sb && durable) {
     await run('settle_reservations', async () => {
       const { error } = await sb.rpc('settle_open_reservations', { p_subject: id.userId })
       if (error && !/could not find the function|settle_open_reservations/i.test(error.message)) throw new Error(error.code ?? 'rpc_failed')
     })
     await run('delete_rows', async () => {
       for (const t of USER_TABLES) {
-        const { error } = await sb.from(t).delete().eq(t === 'profiles' ? 'user_id' : 'user_id', id.userId)
+        const { error } = await sb.from(t).delete().eq('user_id', id.userId)
         // A table that does not exist on this deployment (migration not applied) is not a failure.
         if (error && !(error.code === '42P01' || error.code === 'PGRST205')) throw new Error(`${t}:${error.code ?? 'failed'}`)
       }
     })
   }
-  // Supabase auth user: a real account, or the user behind an ANONYMOUS guest session.
-  const authUser = real ? id.userId : id.anonymous && id.authUserId && isUuid(id.authUserId) ? id.authUserId : null
-  if (sb && authUser) {
-    await run('delete_auth_user', async () => {
-      const { error } = await sb.auth.admin.deleteUser(authUser)
-      if (error && !/not.?found/i.test(error.message)) throw new Error(error.status ? String(error.status) : 'delete_failed')
-    })
-  }
-
   forgetUser(id.userId)
   return { ok: steps.every((s) => s.ok), steps, voiceIds }
 }
 
-/** Server-side data export for the signed-in user (content-free server tables + the voice registry). */
+/** Server-side data export for this device (content-free server tables + the voice registry). */
 export const EXPORT_TABLES = [
   'profiles', 'accessibility_prefs', 'style_cards', 'voice_profiles', 'biometric_consents', 'phrase_boards', 'phrases',
   'conversation_sessions', 'session_members', 'usage_events', 'audit_events', 'phone_calls',
 ] as const
 
-export async function exportAccountData(id: Identity): Promise<Record<string, unknown>> {
+export async function exportDeviceData(id: Identity): Promise<Record<string, unknown>> {
   const sb = adminClient()
   const out: Record<string, unknown> = {}
-  if (!sb || !isUuid(id.userId) || id.kind !== 'supabase') return out
+  if (!sb || !isUuid(id.userId)) return out
   for (const t of EXPORT_TABLES) {
     const { data, error } = await sb.from(t).select('*').eq('user_id', id.userId).limit(5000)
     out[t] = error ? { unavailable: error.code ?? 'error' } : data

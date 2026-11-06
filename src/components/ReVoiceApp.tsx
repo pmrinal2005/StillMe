@@ -24,9 +24,10 @@ import { PrivacyPanel } from './PrivacyPanel'
 import { MetricsPanel } from './MetricsPanel'
 import { PhonePanel } from './PhonePanel'
 import { ReconcilePanel } from './ReconcilePanel'
+import { OperatorAccess } from './OperatorAccess'
 import { Icon, type IconName } from './ui/Icon'
 import { Backdrop, Logo, Orb, type OrbState } from './ui/Orb'
-import { api, ApiError, getSessionTicket, onAuthProblem, setSessionTicket, type StatusResponse } from '@/lib/client/api'
+import { api, ApiError, getSessionTicket, setSessionTicket, type StatusResponse } from '@/lib/client/api'
 import { ctrlEnterAction, elapsedMinutes } from '@/lib/shortcuts'
 import { db, getCachedAudio, putCachedAudio } from '@/lib/client/db'
 import { PcmStreamPlayer } from '@/lib/client/pcm-player'
@@ -36,8 +37,6 @@ import { PRESENCE_LABELS, WorkerPresenceMonitor, type PresenceSnapshot } from '@
 import { effectiveMode, modeAvailable } from '@/lib/session-mode'
 import { fallbackAudibleToPartner, fallbackNotice, OWNER_FALLBACK_GATES_WORKER } from '@/lib/audio-routing'
 import { count, noteTts, recordInterval } from '@/lib/client/metrics'
-import { getSupabase } from '@/lib/client/supabase'
-import { AuthControls } from './AuthControls'
 import { FloatingTip, useFloatingTip } from './ui/FloatingTip'
 import { TurnTracker, type PartnerTurn } from '@/lib/turns'
 import { SerialQueue } from '@/lib/serial-queue'
@@ -74,12 +73,11 @@ const stableOrder = (s: CandidateSet): CandidateSet => ({ ...s, candidates: [...
 const IDLE_BACKGROUND_END_MS = 3 * 60_000
 
 export function ReVoiceApp() {
-  const { prefs, update, sync: prefsSync, retrySync: retryPrefsSync } = usePrefs()
+  const { prefs, update } = usePrefs()
   useScanning(prefs.scanning, prefs.scanIntervalMs)
 
   const [tab, setTab] = useState<Tab>('session')
   const [status, setStatus] = useState<StatusResponse | null>(null)
-  const [needsSignIn, setNeedsSignIn] = useState(false)
   const [online, setOnline] = useState(true)
   const [output, setOutput] = useState<OutputState>({ kind: 'idle' })
   const [composer, setComposer] = useState('')
@@ -183,9 +181,8 @@ export function ReVoiceApp() {
   const refreshStatus = useCallback(async () => {
     try {
       setStatus(await api.status())
-      setNeedsSignIn(false)
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setNeedsSignIn(true)
+    } catch {
+      // Offline or the server is briefly unreachable: keep the last known status; typing and phrase boards still work.
     }
   }, [])
   const refreshStatusRef = useRef<(() => Promise<void>) | null>(null)
@@ -193,37 +190,16 @@ export function ReVoiceApp() {
   useEffect(() => {
     refreshStatus()
     const t = setInterval(refreshStatus, 20_000)
-    const sb = getSupabase()
-    const sub = sb?.auth.onAuthStateChange((event) => {
-      // D #36: signing out (here, in another tab, or because the session died) must not leave a billed listening
-      // session running with no account behind it. The explicit Sign out button ends it BEFORE the token is dropped
-      // (so the server can settle it); this is the safety net for every other way of becoming signed out.
-      if (event === 'SIGNED_OUT' && sessionRef.current) void endSessionRef.current?.('user')
-      refreshStatus()
-    })
     const on = () => setOnline(navigator.onLine)
     on()
     window.addEventListener('online', on)
     window.addEventListener('offline', on)
     return () => {
       clearInterval(t)
-      sub?.data.subscription.unsubscribe()
       window.removeEventListener('online', on)
       window.removeEventListener('offline', on)
     }
   }, [refreshStatus])
-
-  // D #33/#34: the API layer recovers a rejected/missing token by itself; when it cannot, say so instead of silently
-  // running on guest limits.
-  useEffect(
-    () =>
-      onAuthProblem((p) => {
-        if (p.kind === 'expired') setNotice('Your sign-in expired and could not be renewed, so you were signed out. Typing, phrases and library voices still work as a guest. Sign in again for listening sessions and your cloned voices.')
-        else if (p.kind === 'missing') setNotice('Your sign-in could not be read just now, so this request ran with guest limits. Try again in a moment, or sign in again.')
-        else setNotice('The sign-in service is briefly unreachable, so this request ran with guest limits. Try again in a moment.')
-      }),
-    [],
-  )
 
   const sessionActive = !!session
   useEffect(() => {
@@ -940,8 +916,7 @@ export function ReVoiceApp() {
     }
   }
   const inviteUrl = session?.invite ? `${typeof window !== 'undefined' ? window.location.origin : ''}/join#${encodeURIComponent(session.invite)}` : null
-  const isGuest = status?.identity.kind === 'guest'
-  const listenAvailable = !!(status?.providers.livekit || status?.providers.browserStt) && !isGuest
+  const listenAvailable = !!(status?.providers.livekit || status?.providers.browserStt)
   const orbState: OrbState = !online ? 'offline'
     : speaking ? 'speaking'
       : holding ? 'holding'
@@ -999,7 +974,6 @@ export function ReVoiceApp() {
                 <p className="rv-muted truncate text-xs font-semibold">Human-gated voice · you approve every word</p>
               </div>
             </div>
-            <AuthControls needsSignIn={needsSignIn} status={status} onBeforeSignOut={async () => { await endSessionRef.current?.('user'); setSessionTicket(null) }} />
           </header>
 
           <div className="mt-4">
@@ -1202,8 +1176,7 @@ export function ReVoiceApp() {
                         <button data-scan className="rv-btn rv-btn-primary" onClick={startSession} disabled={!online || !listenAvailable}>
                           <Icon name="headphones" size={17} /> Start listening
                         </button>
-                        {isGuest && <p className="rv-alert rv-alert-warn text-sm" role="status"><Icon name="user" size={15} /> Listening sessions need an account (they bill live transcription time). Use <strong>Sign in</strong> at the top. Typing, phrases and voices work as a guest.</p>}
-                        {status && !isGuest && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
+                        {status && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
                       </>
                     ) : (
                       <>
@@ -1260,7 +1233,7 @@ export function ReVoiceApp() {
               {tab === 'voice' && <VoiceWardrobe voiceId={prefs.voiceId} outputLanguage={prefs.outputLanguage} region={region} onSelect={(id) => update({ voiceId: id })} onVoicesChanged={reloadClones} />}
               {tab === 'settings' && (
                 <div className="grid gap-4">
-                  <SettingsPanel prefs={prefs} update={update} sync={prefsSync} retrySync={retryPrefsSync} />
+                  <SettingsPanel prefs={prefs} update={update} />
                   <label className="rv-glass grid gap-2 p-4 text-sm font-semibold sm:p-5">
                     <span className="flex items-center gap-2"><Icon name="hand" size={16} /> “Hold My Turn” phrase (spoken exactly as written when you press it)</span>
                     <input className="rv-input font-normal" maxLength={120} value={prefs.holdTurnPhrase} onChange={(e) => update({ holdTurnPhrase: e.target.value || 'I have something to add.' })} />
@@ -1269,7 +1242,7 @@ export function ReVoiceApp() {
               )}
               {tab === 'bank' && <MessageBank />}
               {tab === 'privacy' && <PrivacyPanel />}
-              {tab === 'metrics' && (<div className="grid gap-4"><MetricsPanel status={status} />{status?.operator && <ReconcilePanel />}</div>)}
+              {tab === 'metrics' && (<div className="grid gap-4"><MetricsPanel status={status} /><OperatorAccess active={!!status?.operator} onChange={() => void refreshStatus()} />{status?.operator && <ReconcilePanel />}</div>)}
             </div>
           </div>
 

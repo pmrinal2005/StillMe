@@ -30,7 +30,7 @@ function fakeClient() {
   }
 }
 
-let currentId: { userId: string; kind: 'supabase' | 'guest' | 'local-demo' } | null = null
+let currentId: { userId: string; deviceId: string } | null = null
 vi.mock('@/lib/server/auth', async (orig) => {
   const real = (await orig()) as Record<string, unknown>
   return { ...real, getIdentity: async () => currentId }
@@ -41,8 +41,8 @@ vi.mock('@/lib/server/durable', async (orig) => {
   return { ...real, adminClient: () => (mode === 'none' ? null : fakeClient()), recordUsage: async () => undefined }
 })
 
-const guest = { userId: 'guest-abc', kind: 'guest' as const }
-const user = { userId: '11111111-2222-4333-8444-555555555555', kind: 'supabase' as const }
+const otherDevice = { userId: '99999999-2222-4333-8444-555555555555', deviceId: 'b'.repeat(32) }
+const user = { userId: '11111111-2222-4333-8444-555555555555', deviceId: 'a'.repeat(32) }
 const reqFrom = (ip?: string) => new Request('http://x/api', { headers: ip ? { 'x-forwarded-for': `${ip}, 10.0.0.1` } : {} })
 
 async function freshState() {
@@ -79,10 +79,10 @@ describe('spend.ts legacy fallback (deployed-site 503 regression)', () => {
     await reserveTtsSpend(user, reqFrom(), 5)
     expect(calls.map((c) => c.fn)).toEqual(['reserve_budget'])
   })
-  it('legacy guests are reserved project-wide (p_user null), never 503', async () => {
+  it('legacy devices are reserved project-wide (p_user always null: device ids are not auth users), never 503', async () => {
     mode = 'legacy'
     const { reserveTtsSpend } = await import('@/lib/server/spend')
-    const r = await reserveTtsSpend(guest, reqFrom('1.2.3.4'), 2)
+    const r = await reserveTtsSpend(otherDevice, reqFrom('1.2.3.4'), 2)
     expect(r.ok).toBe(true)
     expect(calls.find((c) => c.fn === 'reserve_budget')?.args.p_user).toBeNull()
   })
@@ -99,47 +99,73 @@ describe('spend.ts legacy fallback (deployed-site 503 regression)', () => {
   })
 })
 
-describe('A5 durable guest subject', () => {
-  it('guest subject is derived from the client IP, so clearing cookies does not mint a new allowance', async () => {
+describe('A5 durable device subject + per-network pool (no sign-in)', () => {
+  it('the subject is the DEVICE uuid and p_user is always null (no FK to auth.users)', async () => {
     const { durableSubject } = await import('@/lib/server/spend')
-    const a = await durableSubject({ userId: 'guest-one', kind: 'guest' }, reqFrom('9.9.9.9'))
-    const b = await durableSubject({ userId: 'guest-two', kind: 'guest' }, reqFrom('9.9.9.9'))
-    const c = await durableSubject({ userId: 'guest-two', kind: 'guest' }, reqFrom('8.8.8.8'))
-    expect(a.subject).toBe(b.subject)
-    expect(a.subject).not.toBe(c.subject)
-    expect(a).toMatchObject({ user: null, pool: 'guest' })
-    expect(a.subject).not.toContain('9.9.9.9') // hashed, never the raw IP
+    const a = await durableSubject(user, reqFrom('9.9.9.9'))
+    expect(a.subject).toBe(user.userId)
+    expect(a.user).toBeNull()
   })
-  it('guest TTS reservations carry the guest pool caps', async () => {
+  it('the network pool is keyed by an HMAC of the client IP: clearing cookies (new device, same IP) lands in the SAME pool', async () => {
+    const { durableSubject } = await import('@/lib/server/spend')
+    const a = await durableSubject(user, reqFrom('9.9.9.9'))
+    const b = await durableSubject(otherDevice, reqFrom('9.9.9.9'))
+    const c = await durableSubject(otherDevice, reqFrom('8.8.8.8'))
+    expect(a.subject).not.toBe(b.subject)
+    expect(a.pool).toBe(b.pool)
+    expect(a.pool).not.toBe(c.pool)
+    expect(a.pool).toMatch(/^net:[0-9a-f]{32}$/)
+    expect(String(a.pool)).not.toContain('9.9.9.9') // hashed, never the raw IP
+  })
+  it('every TTS reservation carries the network pool caps', async () => {
     const { reserveTtsSpend } = await import('@/lib/server/spend')
-    await reserveTtsSpend(guest, reqFrom('1.1.1.1'), 3)
+    await reserveTtsSpend(otherDevice, reqFrom('1.1.1.1'), 3)
     const a = calls.find((c) => c.fn === 'reserve_budget_v3')!.args
-    expect(a.p_pool).toBe('guest')
+    expect(a.p_pool).toMatch(/^net:/)
+    expect(a.p_user).toBeNull()
     expect(a.p_pool_daily_units).toBeGreaterThan(0)
   })
 })
 
-describe('A8 speak/TTS release releases EVERY layer (incl. guest pool)', () => {
-  it('release refunds user, project, guest pool and durable', async () => {
-    const { reserveTtsSpend } = await import('@/lib/server/spend')
-    const { guestPoolLedger, ledgerFor, projectLedger } = await import('@/lib/server/state')
-    const before = guestPoolLedger().snapshot().tts.chars
-    const r = await reserveTtsSpend(guest, reqFrom('2.2.2.2'), 40)
+describe('A8 speak/TTS release releases EVERY layer (incl. the network pool)', () => {
+  it('release refunds device, project, network pool and durable', async () => {
+    const { reserveTtsSpend, networkPoolKey } = await import('@/lib/server/spend')
+    const { networkPoolLedger, ledgerFor, projectLedger } = await import('@/lib/server/state')
+    const key = await networkPoolKey(reqFrom('2.2.2.2'))
+    const before = networkPoolLedger(key).snapshot().tts.chars
+    const r = await reserveTtsSpend(otherDevice, reqFrom('2.2.2.2'), 40)
     if (!r.ok) throw new Error('reserve failed')
+    expect(networkPoolLedger(key).snapshot().tts.chars).toBe(before + 40)
     await r.release()
-    expect(guestPoolLedger().snapshot().tts.chars).toBe(before)
-    expect(ledgerFor(guest.userId).snapshot().tts.chars).toBe(0)
+    expect(networkPoolLedger(key).snapshot().tts.chars).toBe(before)
+    expect(ledgerFor(otherDevice.userId).snapshot().tts.chars).toBe(0)
     expect(projectLedger().snapshot().tts.chars).toBe(0)
     expect(calls.some((c) => c.fn === 'settle_budget' && c.args.p_commit === false)).toBe(true)
   })
-  it('a durable denial releases the memory layers it had already reserved', async () => {
+  it('a durable denial (SQL reason guest_pool) is reported as network_pool and releases what was reserved', async () => {
     deny = 'guest_pool'
-    const { reserveTtsSpend } = await import('@/lib/server/spend')
-    const { guestPoolLedger, projectLedger } = await import('@/lib/server/state')
-    const r = await reserveTtsSpend(guest, reqFrom('3.3.3.3'), 40)
-    expect(r).toMatchObject({ ok: false, status: 429, body: { reason: 'guest_pool' } })
-    expect(guestPoolLedger().snapshot().tts.chars).toBe(0)
+    const { reserveTtsSpend, networkPoolKey } = await import('@/lib/server/spend')
+    const { networkPoolLedger, projectLedger } = await import('@/lib/server/state')
+    const key = await networkPoolKey(reqFrom('3.3.3.3'))
+    const r = await reserveTtsSpend(otherDevice, reqFrom('3.3.3.3'), 40)
+    expect(r).toMatchObject({ ok: false, status: 429, body: { reason: 'network_pool' } })
+    expect(networkPoolLedger(key).snapshot().tts.chars).toBe(0)
     expect(projectLedger().snapshot().tts.chars).toBe(0)
+  })
+  it('one network cannot exceed its pool even with fresh devices (cookie clearing mints no allowance)', async () => {
+    const { reserveTtsSpend } = await import('@/lib/server/spend')
+    const { NETWORK_POOL_LIMITS, LIMITS, PROJECT_LIMITS } = await import('@/lib/budget')
+    // The pool must be stricter than the project cap, otherwise it protects nothing.
+    expect(NETWORK_POOL_LIMITS.assembly.dailyTtsChars).toBeGreaterThan(LIMITS.assembly.dailyTtsChars)
+    expect(NETWORK_POOL_LIMITS.assembly.dailyTtsChars).toBeLessThan(PROJECT_LIMITS.assembly.dailyTtsChars)
+    const day = LIMITS.assembly.dailyTtsChars // one device may use its whole day...
+    const dev = (n: number) => ({ userId: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`, deviceId: String(n).padStart(32, '0') })
+    const first = await reserveTtsSpend(dev(1), reqFrom('7.7.7.7'), day)
+    const second = await reserveTtsSpend(dev(2), reqFrom('7.7.7.7'), day) // ...a FRESH device behind the same IP cannot repeat it
+    const elsewhere = await reserveTtsSpend(dev(3), reqFrom('6.6.6.6'), 100) // a different network is unaffected
+    expect(first.ok).toBe(true)
+    expect(second).toMatchObject({ ok: false, status: 429, body: { reason: 'network_pool' } })
+    expect(elsewhere.ok).toBe(true)
   })
 })
 
@@ -221,7 +247,7 @@ describe('A1/A10 /api/worker/usage', () => {
   it('agent minutes are recorded per room', async () => {
     const { POST } = await import('@/app/api/worker/usage/route')
     await POST(await workerReq({ kind: 'agent', room: 'rv-0123456789abcdef01234567', owner: user.userId, minutes: 4.2 }))
-    expect(calls.at(-1)).toMatchObject({ fn: 'record_agent_minutes', args: { p_ref: 'rv-0123456789abcdef01234567', p_units: 5, p_user: user.userId } })
+    expect(calls.at(-1)).toMatchObject({ fn: 'record_agent_minutes', args: { p_ref: 'rv-0123456789abcdef01234567', p_units: 5, p_user: null } })
   })
 })
 
@@ -248,7 +274,7 @@ describe('A2/A3 /api/livekit/end: ticket-only auth + settlement by ref', () => {
     expect(calls.find((c) => c.fn === 'settle_budget')).toMatchObject({ args: { p_id: 'res-xyz', p_commit: true, p_actual_units: 2 } })
   })
   it("someone else's ticket is refused (403) and nothing is settled", async () => {
-    currentId = { userId: 'intruder', kind: 'supabase' }
+    currentId = { userId: 'intruder', deviceId: 'c'.repeat(32) }
     const { POST } = await import('@/app/api/livekit/end/route')
     const res = await POST(endReq({ room, ticket: await ticketFor(user.userId, room) }))
     expect(res.status).toBe(403)

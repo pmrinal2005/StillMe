@@ -1,4 +1,4 @@
-import { getIdentity, json, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { durableReplay, recordUsage } from '@/lib/server/durable'
 import { reserveTtsSpend } from '@/lib/server/spend'
@@ -23,7 +23,6 @@ export const maxDuration = 60
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
   const parsed = SpeakRequest.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
   const { approval, text } = parsed.data

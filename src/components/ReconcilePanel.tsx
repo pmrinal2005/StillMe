@@ -4,11 +4,13 @@
  * AssemblyAI / Groq / LiveKit dashboards actually report and review drift. Content-free.
  */
 import { useEffect, useState } from 'react'
-import { api, ApiError } from '@/lib/client/api'
+import { api, ApiError, getOperatorToken, setOperatorToken } from '@/lib/client/api'
 
 type Data = Awaited<ReturnType<typeof api.reconcileGet>>
 
 export function ReconcilePanel() {
+  const [token, setToken] = useState('')
+  useEffect(() => setToken(getOperatorToken()), [])
   const [data, setData] = useState<Data | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [provider, setProvider] = useState('assemblyai')

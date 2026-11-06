@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { parseVoiceExpiryMs, sanitizeProviderCode, ttsBase } from '@/lib/server/assemblyai'
 import { reserveTtsSpend } from '@/lib/server/spend'
@@ -27,8 +27,6 @@ const Body = z.object({
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
   const key = env.assemblyKey()
   if (!key) return json({ error: 'assemblyai_not_configured' }, 503)
   const parsed = Body.safeParse(await req.json().catch(() => null))

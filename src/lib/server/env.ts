@@ -52,26 +52,23 @@ export const env = {
   livekitKey: () => opt('LIVEKIT_API_KEY'),
   livekitSecret: () => opt('LIVEKIT_API_SECRET'),
   livekitAgentName: () => opt('LIVEKIT_AGENT_NAME') ?? 'revoice-worker',
-  supabaseUrl: () => opt('NEXT_PUBLIC_SUPABASE_URL'),
-  supabaseAnon: () => opt('NEXT_PUBLIC_SUPABASE_ANON_KEY'),
+  /** Server-side durable store only (the browser never talks to Supabase). `SUPABASE_URL` preferred; the legacy name still works. */
+  supabaseUrl: () => opt('SUPABASE_URL') ?? opt('NEXT_PUBLIC_SUPABASE_URL'),
   supabaseService: () => opt('SUPABASE_SERVICE_ROLE_KEY'),
   allowBrowserStt: () => opt('REVOICE_ALLOW_BROWSER_STT') === 'true',
   /** Included US number only — the owner enables this ONLY if activation requires no new spending. */
   phoneInboundEnabled: () => opt('REVOICE_PHONE_INBOUND_ENABLED') === 'true',
   phoneNumberDisplay: () => opt('REVOICE_PHONE_NUMBER_DISPLAY'),
   /**
-   * B13: operators (spend reconciliation + operator status detail). FAIL CLOSED: when BOTH lists are empty
-   * nobody is an operator. (It used to mean "every account", including anonymous Supabase sign-ins.)
-   * Comma-separated Supabase user ids and/or VERIFIED e-mail addresses of real (non-anonymous) accounts.
+   * Operator access (spend reconciliation + operator status detail) is NOT an account: the caller presents
+   * REVOICE_OPERATOR_TOKEN in the `x-revoice-operator` header. FAIL CLOSED: unset = nobody is an operator.
    */
-  operatorIds: () => (opt('REVOICE_OPERATOR_IDS') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
-  operatorEmails: () => (opt('REVOICE_OPERATOR_EMAILS') ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  operatorToken: () => opt('REVOICE_OPERATOR_TOKEN'),
   /**
-   * B11: optional allowlist of who may BIND a cloned voice id to their account (user ids or verified e-mails).
-   * Empty = any signed-in, non-guest account may register (the AssemblyAI account is shared, so ownership is
-   * "first verified claim"; set this to let only the deployment owner decide who can claim a clone).
+   * Optional passcode that gates REGISTERING a cloned voice (sent as `x-revoice-clone-passcode`). There are no accounts,
+   * so on a public deployment set this to let only the owner bind a clone id to a device. Unset = anyone may register.
    */
-  cloneRegistrants: () => (opt('REVOICE_CLONE_REGISTRANTS') ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  clonePasscode: () => opt('REVOICE_CLONE_PASSCODE'),
   /**
    * HMAC secret for approvals, invites, demo identity, session tickets and worker→app auth.
    *
@@ -99,7 +96,6 @@ export function providerStatus() {
     assemblyai: !!env.assemblyKey(),
     groq: !!env.groqKey(),
     livekit: !!(env.livekitUrl() && env.livekitKey() && env.livekitSecret()),
-    supabase: !!(env.supabaseUrl() && env.supabaseAnon()),
     durableStore: !!(env.supabaseUrl() && env.supabaseService()),
     browserStt: env.allowBrowserStt() && !!env.assemblyKey(),
     phoneInbound: env.phoneInboundEnabled() && !!(env.livekitUrl() && env.livekitKey() && env.livekitSecret()),

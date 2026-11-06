@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { db, purgeVoiceCache, syncVoicesFromServer, uid, type ConsentEvent } from '@/lib/client/db'
-import { api, ApiError } from '@/lib/client/api'
+import { api, ApiError, getClonePasscode, setClonePasscode } from '@/lib/client/api'
 import {
   CONSENT_PERIOD_DAYS,
   LIBRARY_VOICES,
@@ -155,7 +155,7 @@ export function VoiceWardrobe(props: {
         </details>
       )}
       {!isLibraryVoice(voiceId) && !clones.some((c) => c.voiceId === voiceId) && (
-        <p role="alert" className="rv-alert rv-alert-warn mt-2 text-sm">The selected voice is not registered to your account; select a library voice.</p>
+        <p role="alert" className="rv-alert rv-alert-warn mt-2 text-sm">The selected voice is not registered to this device; select a library voice.</p>
       )}
     </section>
   )
@@ -174,6 +174,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
   const set = (p: Partial<typeof f>) => setF((x) => ({ ...x, ...p }))
 
   const [busy, setBusy] = useState(false)
+  const [passcode, setPasscode] = useState(() => getClonePasscode())
   const save = async () => {
     if (!f.voiceId.trim() || !f.label.trim() || !f.ownerName.trim()) return setErr('Voice ID, label and owner name are required.')
     if (!f.speakerConsent || !f.rightsConfirmed || !f.biometricTermsAccepted) return setErr('All three consent confirmations are required.')
@@ -182,7 +183,7 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
     setErr(null)
     try {
       // B11: the SERVER records the consent (with its own timestamp), verifies the voice exists with the provider in this
-      // data zone and binds the voice id to this ONE account. Nothing is saved on the device unless that succeeds.
+      // data zone and binds the voice id to this ONE device identity. Nothing is saved on the device unless that succeeds.
       const r = await api.voiceRegister({
         voiceId: f.voiceId.trim(), label: f.label.trim(), ownerName: f.ownerName.trim(), recordingLanguage: f.recordingLanguage,
         provenance: f.provenance, provenanceNote: f.provenanceNote, fallbackVoiceId: f.fallbackVoiceId,
@@ -194,13 +195,12 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
     } catch (e) {
       const code = e instanceof ApiError ? e.code : 'error'
       const msg: Record<string, string> = {
-        account_required: 'Sign in with an account to register a cloned voice.',
-        voice_claimed: 'This voice id is already registered to another account.',
-        voice_tombstoned: 'This voice belonged to a deleted account and cannot be registered.',
+        voice_claimed: 'This voice id is already registered to another device.',
+        voice_tombstoned: 'This voice was deleted from another device and cannot be registered.',
         voice_not_found: 'AssemblyAI does not know this voice id in this data zone. Create it in the dashboard first.',
-        registration_not_allowed: 'This deployment restricts who may register cloned voices.',
+        registration_not_allowed: 'This deployment requires the owner passcode to register a cloned voice. Enter it below.',
         rate_limited: 'Too many attempts. Try again later.',
-        voice_registry_migration_required: 'The server database needs migration 0004 before cloned voices can be registered.',
+        voice_registry_migration_required: 'The server database needs migrations 0004 and 0007 before cloned voices can be registered.',
       }
       setErr(msg[code] ?? `Registration failed (${code}).`)
     } finally {
@@ -266,6 +266,11 @@ function CloneOnboarding({ region, onDone }: { region: 'us' | 'eu'; onDone: () =
               {LIBRARY_VOICES.map((v) => <option key={v.id} value={v.id}>{v.name} ({OUTPUT_LANGUAGE_LABELS[v.language]})</option>)}
             </select>
           </label>
+          {(err === 'This deployment requires the owner passcode to register a cloned voice. Enter it below.' || passcode) && (
+            <label className="grid" htmlFor="clone-passcode">Owner passcode (only if this deployment sets one)
+              <input id="clone-passcode" type="password" autoComplete="off" className="rv-input" value={passcode} onChange={(e) => { setPasscode(e.target.value); setClonePasscode(e.target.value) }} />
+            </label>
+          )}
           <label className="flex gap-2"><input type="checkbox" checked={f.qualityChecked} onChange={(e) => set({ qualityChecked: e.target.checked })} /> The owner listened to a sample in the dashboard and approves its quality.</label>
           {err && <p role="alert" className="rv-text-danger">{err}</p>}
           <div className="flex flex-wrap gap-2"><button className="rv-btn" onClick={() => setStep(3)}>Back</button><button className="rv-btn rv-btn-primary" disabled={busy} onClick={save}>{busy ? 'Registering…' : 'Register voice'}</button></div>

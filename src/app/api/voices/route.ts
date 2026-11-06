@@ -1,11 +1,11 @@
 import { z } from 'zod'
-import { getIdentity, json, requireAccount, unauthorized } from '@/lib/server/auth'
+import { getIdentity, json, mayRegisterClone } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { parseVoiceExpiryMs, ttsBase } from '@/lib/server/assemblyai'
 import { reserveTtsSpend } from '@/lib/server/spend'
 import { allow } from '@/lib/server/rate-limit'
 import { audit } from '@/lib/server/durable'
-import { mayRegisterClone, registerClonedVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
+import { registerClonedVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { OutputLanguage, TTS_MODEL } from '@/lib/contracts'
 import { codePoints } from '@/lib/hash'
 import { fallbackVoiceFor, isLibraryVoice } from '@/lib/voices'
@@ -32,8 +32,6 @@ const Body = z.object({
 /** B11: the caller's own server-side registry (the browser copy is only a cache of this). */
 async function handleGET(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
   const voices = await voiceStoreFor(id.userId).list(id.userId)
   return json({ voices, region: env.assemblyRegion() })
 }
@@ -46,9 +44,7 @@ async function handleGET(req: Request) {
  */
 async function handlePOST(req: Request) {
   const id = await getIdentity(req)
-  if (!id) return unauthorized()
-  { const gate = requireAccount(id, 'cloned voices'); if (gate) return gate }
-  if (!mayRegisterClone(id)) return json({ error: 'registration_not_allowed', message: 'This deployment restricts who may register cloned voices.' }, 403)
+  if (!(await mayRegisterClone(req))) return json({ error: 'registration_not_allowed', message: 'This deployment requires the owner passcode to register a cloned voice.' }, 403)
   const key = env.assemblyKey()
   if (!key) return json({ error: 'assemblyai_not_configured' }, 503)
   const parsed = Body.safeParse(await req.json().catch(() => null))
