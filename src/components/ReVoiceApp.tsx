@@ -854,6 +854,7 @@ export function ReVoiceApp() {
       // reservation — previously the client only cleaned up locally and the reservation stayed open until swept.
       if (s.state === 'closed' && sessionRef.current && endedRef.current !== sessionRef.current) {
         void endSessionRef.current?.('error')
+        if (s.detail) setNotice(`Listening stopped (${s.detail.replace(/_/g, ' ')}). Press Start listening to begin again — typing and phrases still work.`)
       }
       if (s.state === 'error') setNotice(`Listening error${s.detail ? ` (${s.detail})` : ''}. Typing and phrases still work.`)
     },
@@ -968,7 +969,8 @@ export function ReVoiceApp() {
         setSession(s)
         // B5: room mode is NOT enabled on connect. Speech stays on direct HTTP TTS until the worker is
         // confirmed present; the monitor also ends the session automatically if no worker ever joins.
-        const monitor = new WorkerPresenceMonitor()
+        // LiveKit Build can shut an idle agent down: the next session may wait 10-20 s for it to join (quotas-and-limits → Agent cold starts).
+        const monitor = new WorkerPresenceMonitor({ joinTimeoutMs: 22_000 })
         presenceRef.current = monitor
         speech?.setRouteSource(() => monitor.route())
         setWorker(monitor.snapshot())
@@ -1142,7 +1144,8 @@ export function ReVoiceApp() {
     setComposer(c.text)
     speech?.edit(c.text)
     setComposerSource({ candidateSetId: s.id, candidateId: c.id, turn: s.turn, original: c.text, intent: c.intent, proof: s.proof, draftedFrom: setRef.current?.set.id === s.id ? setRef.current.draftedFrom : (trackerRef.current.get(s.turn.turnId)?.text ?? '') })
-    setSourceStale(null)
+    // A card that is already stale stays flagged in the composer: speaking it is then sent as the owner's own words (no AI proof).
+    setSourceStale(stale)
     document.getElementById('composer-input')?.focus()
   }
   const acceptPending = () => {

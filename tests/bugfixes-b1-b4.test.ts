@@ -113,11 +113,18 @@ describe('B2 — stable approval secret across instances (and the worker)', () =
 
 // ------------------------------------------------------------------ B3
 describe('B3 — listening minutes are released / settled', () => {
-  it('reproduces the lockout: two full reservations exhaust the day', () => {
-    const l = new BudgetLedger()
+  const capped = () => new BudgetLedger({ ...LIMITS, assembly: { ...LIMITS.assembly, dailyFlagshipListeningMinutes: 40 } } as unknown as typeof LIMITS)
+
+  it('reproduces the lockout (only when a daily cap is configured): two full reservations exhaust the day', () => {
+    const l = capped()
     expect(l.reserveSttMinutes(20, T0)).toEqual({ ok: true, minutes: 20 })
     expect(l.reserveSttMinutes(20, T0)).toEqual({ ok: true, minutes: 20 })
     expect(l.reserveSttMinutes(1, T0)).toMatchObject({ ok: false, reason: 'stt_daily_minutes' })
+  })
+
+  it('default config has NO daily minute cap, so "stt daily minutes" can never lock a visitor out', () => {
+    const l = new BudgetLedger()
+    for (let i = 0; i < 5; i++) expect(l.reserveSttMinutes(20, T0)).toEqual({ ok: true, minutes: 20 })
   })
 
   it('a failed start (0 used) refunds everything', () => {
@@ -129,14 +136,14 @@ describe('B3 — listening minutes are released / settled', () => {
   })
 
   it('ending after 3 minutes keeps 3 and refunds 17 — no lockout after many short sessions', () => {
-    const l = new BudgetLedger()
+    const l = capped()
     for (let i = 0; i < 10; i++) {
       const r = l.reserveSttMinutes(20, T0)
       expect(r.ok).toBe(true)
       if (r.ok) l.releaseSttMinutes(r.minutes, 3, dayKey(T0), T0) // settle exactly what was granted
     }
     expect(l.snapshot(T0).stt.minutes).toBe(30)
-    expect(l.reserveSttMinutes(20, T0)).toEqual({ ok: true, minutes: LIMITS.assembly.dailyFlagshipListeningMinutes - 30 })
+    expect(l.reserveSttMinutes(20, T0)).toEqual({ ok: true, minutes: 10 }) // 40 - 30
   })
 
   it('refunds never go negative and are ignored after the day rolled over', () => {

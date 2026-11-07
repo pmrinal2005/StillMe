@@ -7,7 +7,7 @@ import 'server-only'
  */
 const ALLOWED = new Set([
   'evt', 'attempt', 'chars', 'billed', 'req', 'tokens', 'status', 'reason', 'ms', 'room', 'voice',
-  'kind', 'code', 'provider', 'minutes', 'usd', 'retryAfter', 'generation', 'turn', 'revision', 'route', 'via', 'repeat',
+  'kind', 'code', 'provider', 'cleared', 'durable', 'live', 'minutes', 'usd', 'retryAfter', 'generation', 'turn', 'revision', 'route', 'via', 'repeat',
 ])
 
 export function logEvent(fields: Record<string, unknown>) {

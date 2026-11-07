@@ -106,6 +106,7 @@ export const api = {
   phoneRevoke: () => call<{ ok: true }>('/api/phone/pair', { method: 'DELETE' }),
   reconcileGet: () => call<{ estimate: { source: string; assemblyaiUsd: number; phone: { month: string; minutesUsed: number; cap: number } }; recorded: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note: string; at: number }[]; assemblyai: { status: string; driftUsd: number | null } | null }>('/api/reconcile'),
   reconcilePost: (b: { provider: string; periodStart: string; periodEnd: string; providerReportedUsd: number | null; note?: string }) => call<{ ok: true; result: { status: string; driftUsd: number | null } | null }>('/api/reconcile', { method: 'POST', body: JSON.stringify(b) }),
+  resetSttQuota: () => call<{ ok: true; memoryMinutesCleared: number; durableReservationsReleased: number | null }>('/api/operator/reset-stt', { method: 'POST', body: '{}' }),
   deviceKey: () => call<{ key: string }>('/api/device'),
   restoreDevice: (key: string) => call<{ ok: true }>('/api/device', { method: 'POST', body: JSON.stringify({ key }) }),
   exportServer: () => call<Record<string, unknown>>('/api/data/export'),

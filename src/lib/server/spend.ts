@@ -91,9 +91,10 @@ export function durableCaps(provider: SpendProvider, pooled: boolean): Caps {
       }
     case 'assemblyai_stt':
       return {
-        subjectUnits: L.assembly.dailyFlagshipListeningMinutes, subjectUsd: L.assembly.dailyUsd, subjectCount: null,
-        poolUnits: pooled ? P.assembly.dailyFlagshipListeningMinutes : null, poolUsd: pooled ? P.assembly.dailyUsd : null, poolCount: null,
-        projectUnits: J.assembly.dailyFlagshipListeningMinutes, projectUsd: J.assembly.dailyUsd, projectCount: null,
+        // 0 = no daily listening-minute cap (REVOICE_STT_DAILY_MINUTES): pass NULL so the SQL function skips the units check.
+        subjectUnits: L.assembly.dailyFlagshipListeningMinutes || null, subjectUsd: L.assembly.dailyUsd, subjectCount: null,
+        poolUnits: pooled ? P.assembly.dailyFlagshipListeningMinutes || null : null, poolUsd: pooled ? P.assembly.dailyUsd : null, poolCount: null,
+        projectUnits: J.assembly.dailyFlagshipListeningMinutes || null, projectUsd: J.assembly.dailyUsd, projectCount: null,
       }
     case 'groq':
       return {

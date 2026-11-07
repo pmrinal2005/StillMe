@@ -55,7 +55,7 @@ async function handlePOST(req: Request) {
     if (!direct && env.livekitUrl()) await deleteRoom(room).catch(() => undefined) // already-gone rooms are fine
 
     const used = sttMinutesToCommit({ reserved: s.sttMinutes, startedAt: s.startedAt })
-    const first = settleLocalStt(id.userId, room, used)
+    const first = settleLocalStt(id.userId, room, used, Date.now(), s.sttDay ? { sttMinutes: s.sttMinutes, sttDay: s.sttDay } : undefined)
 
     // A3: durable settlement by id, else by ref (room). Both only touch rows still 'reserved' (idempotent).
     let settled = 0

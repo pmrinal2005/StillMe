@@ -9,6 +9,41 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0j. Listening-quota lockout + unclickable suggestion cards (this release)
+
+**Reported:** (1) *Start listening* hung, then said `Could not start listening (stt daily minutes)`. (2) After speech was processed, the suggestion cards could not be clicked or applied to the composer.
+
+### Root causes
+
+| # | Cause (found by tracing the code) | Fix |
+|---|---|---|
+| 1a | `LIMITS.assembly.dailyFlagshipListeningMinutes = 40`. Every *Start listening* **reserves up to 20 min up front**, so two full reservations used the whole day. | The daily minute cap is now **off by default** (`0`). Opt in with `REVOICE_STT_DAILY_MINUTES=40`. The 20-min session cap, the $/day ceiling and the protected credit reserve still bound spend. |
+| 1b | Refunds only worked on the serverless instance that made the reservation (in-memory cache). On Vercel, `/api/livekit/end` usually lands on another instance, so the reservation stayed charged. | `settleLocalStt` now refunds from the **signed session ticket** (reserved minutes + day), once per room. |
+| 1c | A LiveKit attempt that fell back to direct listening reserved minutes twice. | Failed/abandoned attempts are settled (existing path) and the cap no longer applies by default. |
+| 1d | No way to clear a stuck allowance. | `POST /api/operator/reset-stt` + **Settings -> Owner tools -> Reset listening quota** (needs `REVOICE_OPERATOR_TOKEN`; fail-closed). Also releases stuck `reserved` rows in Supabase when configured. |
+| 2a | `Suggestions.tsx`: the **Use** button was `disabled={!!stale}`. | Never disabled. When the Conversation Brake flagged the set, the button reads *Use anyway (edit first)*, the composer shows the "context changed" badge and the text is sent as the owner's **own words** (no AI proof), so the safety model is unchanged. |
+| 2b | The Brake fired on harmless partial -> formatted-final changes (`seven o'clock` -> `7 o'clock.`) because number words and digits were compared as different tokens, so cards went grey almost every turn. | `materialChange` normalizes number words and `:00` first. Real changes (negation, a different number/date, topic change) still trip it. |
+| 2c | Stale state was cleared when a card was applied, hiding the warning. | `useCandidate` keeps the stale flag in the composer. |
+
+### Checks against the AssemblyAI docs and LiveKit quotas
+
+* AssemblyAI: **free accounts allow 5 new streaming sessions per minute** (pay-as-you-go 100+). `/api/stt-token` now refuses early with a friendly, retryable `stt_rate_limited` (override `REVOICE_STT_SESSIONS_PER_MIN`) instead of reserving minutes and failing at the WebSocket handshake. Non-normal WebSocket close codes are now shown to the owner.
+* LiveKit Build (quotas-and-limits): **5 concurrent agent sessions**, 1,000 agent minutes, **agent cold start 10-20 s**. `/api/livekit/session` refuses when 5 owner rooms are already live (client falls back to direct listening); the worker-join timeout is 22 s (was 12 s) so a cold start is not mistaken for "no worker".
+* Live key checks (key supplied via environment only, never stored): REST `/v2/transcript` 200; streaming token mint 200; 24 library voices synthesize; Hindi TTS rejected 422; `universal-3-6-pro` Begin -> Turn(partial) -> Turn(end_of_turn) -> Termination(1000) round trip; the app's own minted `wsUrl` handshakes.
+
+### Verification (this pass)
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` | 23 files, 417+ tests pass (3 tests that asserted the old hard 40-min cap now cover both modes) |
+| `cd worker && pytest -q` | 117 pass |
+| `npm run build` + secret scan | pass, no leaks |
+| 5 start/stop cycles against the real route | all granted, none blocked by `stt_daily_minutes` |
+| Headless Chromium (real pointer click) | cards enabled and hit-testable, click fills the composer, also when stale |
+
+> **Never put the AssemblyAI key in a file.** Add it in Vercel -> Settings -> Environment Variables. The key used for these checks was shared in chat: rotate it in the AssemblyAI dashboard.
+
 ## 0i. Final verification pass: server backstop for auto turn-taking, repo cleanup, live checks
 
 What was wrong when this pass started (the previous commit message claimed more than the tree contained):

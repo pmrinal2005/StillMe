@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { getIdentity, json } from '@/lib/server/auth'
 import { env } from '@/lib/server/env'
 import { activeSession, rv, settleLocalStt } from '@/lib/server/state'
-import { createRoomAndDispatch, deleteRoom, listOwnerRooms, newRoomName, ownerParticipantIdentity, ownerToken, signInvite } from '@/lib/server/livekit'
+import { createRoomAndDispatch, deleteRoom, listAllOwnerRooms, listOwnerRooms, newRoomName, ownerParticipantIdentity, ownerToken, signInvite } from '@/lib/server/livekit'
 import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { agentMinutesThisMonth, reserveSttSpend, settleByRef, settleDurableId } from '@/lib/server/spend'
 import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
@@ -91,6 +91,18 @@ async function handlePOST(req: Request) {
   } catch (e) {
     logEvent({ evt: 'session_start', status: 'error', reason: 'livekit_unreachable', detail: (e as Error).message?.slice(0, 120) })
     return json({ error: 'livekit_unreachable', message: 'Could not reach LiveKit. Typing and phrases still work.' }, 502)
+  }
+
+  // ---- LiveKit Build allows 5 concurrent agent sessions (docs: quotas-and-limits). Refuse BEFORE reserving anything so the
+  // client falls back to direct listening instead of waiting for a worker that LiveKit would never start.
+  try {
+    const live = (await listAllOwnerRooms()).filter((r) => r.meta.ownerIdentity !== id.userId).length
+    if (live >= LIMITS.livekit.concurrentAgentSessions) {
+      logEvent({ evt: 'session_start', status: 'denied', reason: 'livekit_concurrency', live })
+      return json({ error: 'livekit_concurrency', message: 'The shared voice worker is at its concurrent-session limit right now. Switching to direct listening on this device.' }, 429)
+    }
+  } catch {
+    // LiveKit was reachable a moment ago for the owner-rooms check; an inventory failure must not block the session.
   }
 
   // ---- A10: monthly LiveKit agent-minute cap (worker-reported, durable). Refuse BEFORE reserving anything.

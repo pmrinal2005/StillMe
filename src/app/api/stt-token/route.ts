@@ -10,6 +10,7 @@ import { mintSttToken, sttWsUrl } from '@/lib/server/assemblyai'
 import { InputLanguage } from '@/lib/contracts'
 import { LIMITS } from '@/lib/budget'
 import { withJsonErrors } from '@/lib/server/route'
+import { allow } from '@/lib/server/rate-limit'
 
 export const dynamic = 'force-dynamic'
 
@@ -31,6 +32,13 @@ async function handlePOST(req: Request) {
   const parsed = Body.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return json({ error: 'invalid_request' }, 400)
   const b = parsed.data
+
+  // AssemblyAI limits NEW streaming sessions per minute per ACCOUNT (free: 5, pay-as-you-go: 100+). Refuse early with a friendly,
+  // retryable answer instead of reserving minutes and then failing at the WebSocket handshake. Override: REVOICE_STT_SESSIONS_PER_MIN.
+  const perMin = Math.max(1, Number(process.env.REVOICE_STT_SESSIONS_PER_MIN) || 5)
+  if (!allow('stt-token:project', perMin, 60_000)) {
+    return json({ error: 'stt_rate_limited', message: 'Too many listening sessions were started in the last minute. Wait a few seconds and press Start listening again.', retryAfterMs: 15_000 }, 429)
+  }
 
   // A7: durable reservation (user ∩ project ∩ durable) with ref = a pseudo-session id, so /api/livekit/end can
   // settle it on ANY instance. Previously only per-instance memory was charged, the user reservation leaked when

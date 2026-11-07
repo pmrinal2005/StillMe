@@ -211,9 +211,12 @@ export class DirectSttListener {
         else if (m.error) this.ev.onStatus({ state: 'error', detail: String(m.error) })
       } catch {}
     }
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       this.cleanupAudio()
-      this.ev.onStatus({ state: 'closed' })
+      // 1000 = normal end (Terminate / session ended). Any other code (3005 expired, 1008 policy, 4xxx provider refusal, 1011 server
+      // error) is reported so the owner is told WHY listening stopped instead of seeing a silent drop.
+      const normal = e.code === 1000 || e.code === 1005
+      this.ev.onStatus(normal ? { state: 'closed' } : { state: 'closed', detail: `stt_closed_${e.code}${e.reason ? `_${String(e.reason).slice(0, 40)}` : ''}` })
     }
     ws.onerror = () => this.ev.onStatus({ state: 'error', detail: 'stt_socket_error' })
     await new Promise<void>((res, rej) => {

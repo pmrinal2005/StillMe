@@ -55,7 +55,7 @@ export function Suggestions(props: {
         {error && <p className="rv-alert rv-alert-warn">{error}</p>}
         {stale && (
           <p role="alert" className="rv-alert rv-alert-warn">
-            <Icon name="alert" size={16} /> Conversation Brake: these suggestions no longer match what was said ({stale.replace(/_/g, ' ')}). Review before using.
+            <Icon name="alert" size={16} /> Conversation Brake: these suggestions may no longer match what was said ({stale.replace(/_/g, ' ')}). You can still tap one to edit it — it will be sent as your own words.
           </p>
         )}
       </div>
@@ -75,8 +75,10 @@ export function Suggestions(props: {
                 {c.risk !== 'none' && <span className="rv-badge rv-badge-warn">Review carefully: {c.risk}</span>}
               </div>
               <p className="flex-1 text-lg font-medium leading-snug">{c.text}</p>
-              <button data-scan className="rv-btn rv-btn-primary" disabled={!!stale} onClick={() => props.onUse(c, set)} aria-label={`Use suggestion: ${c.text}`}>
-                <Icon name="edit" size={16} /> Use (edit before speaking)
+              {/* Never disabled: a card that went stale (Conversation Brake) can still be loaded into the composer to edit.
+                  The composer then says the context changed and, if spoken, it is sent as the owner's OWN words (no AI proof). */}
+              <button data-scan data-testid="use-suggestion" type="button" className="rv-btn rv-btn-primary" onClick={() => props.onUse(c, set)} aria-label={stale ? `Use suggestion anyway (context changed): ${c.text}` : `Use suggestion: ${c.text}`}>
+                <Icon name="edit" size={16} /> {stale ? 'Use anyway (edit first)' : 'Use (edit before speaking)'}
               </button>
               <div className="flex flex-wrap gap-2">
                 <button className="rv-btn flex-1 text-xs whitespace-nowrap" onClick={() => props.onFeedback(c, 'sounds_like_me')}><Icon name="heart" size={14} /> Sounds like me</button>

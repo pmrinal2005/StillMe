@@ -52,7 +52,8 @@ export async function reserveDurable(userId: string, provider: DurableProvider, 
   const a = LIMITS.assembly
   const caps: Record<DurableProvider, { user: number; project: number; usd: number }> = {
     assemblyai_tts: { user: a.dailyTtsChars, project: a.dailyTtsChars * 2, usd: units * PRICES.ttsPerChar },
-    assemblyai_stt: { user: a.dailyFlagshipListeningMinutes, project: a.dailyFlagshipListeningMinutes * 2, usd: (units / 60) * PRICES.sttFlagshipPerHour },
+    // 0 = no daily minute cap → a huge number keeps this legacy helper's NOT NULL arguments valid.
+    assemblyai_stt: { user: a.dailyFlagshipListeningMinutes || 1e9, project: a.dailyFlagshipListeningMinutes ? a.dailyFlagshipListeningMinutes * 2 : 1e9, usd: (units / 60) * PRICES.sttFlagshipPerHour },
     groq: { user: LIMITS.groq.dailyTokens, project: LIMITS.groq.dailyTokens, usd: 0 },
     livekit_agent: { user: 60, project: Math.floor(LIMITS.livekit.plannedAgentMinutes / 30), usd: 0 },
     livekit_phone: { user: LIMITS.livekit.monthlyInboundPhoneMinutes, project: LIMITS.livekit.monthlyInboundPhoneMinutes, usd: 0 },

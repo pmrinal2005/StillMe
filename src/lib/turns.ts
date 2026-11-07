@@ -34,8 +34,22 @@ export function isSubstantiveTurn(text: string): boolean {
   return tokens(text).length >= 3
 }
 
+const NUMBER_WORDS: Record<string, string> = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12' }
+
+/**
+ * AssemblyAI's partial transcripts say "seven o'clock" and the formatted final says "7 o'clock" (or "7:00"). That is the SAME
+ * number, not a changed one: without this the Conversation Brake fired on almost every formatted final and greyed out the
+ * suggestion cards. Number words become digits and a trailing ":00" is dropped before comparing.
+ */
+function normalizeNumbers(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/g, (w) => NUMBER_WORDS[w] ?? w)
+    .replace(/\b(\d{1,2}):00\b/g, '$1')
+}
+
 function matches(re: RegExp, s: string): string[] {
-  return (s.toLowerCase().match(re) ?? []).map((m) => m.replace(/\s+/g, ' '))
+  return (normalizeNumbers(s).match(re) ?? []).map((m) => m.replace(/\s+/g, ' '))
 }
 
 function multiset(a: string[]): Map<string, number> {

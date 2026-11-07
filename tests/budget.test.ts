@@ -83,13 +83,28 @@ describe('AssemblyAI reservations', () => {
     expect(l.reserveTts(100, T0)).toMatchObject({ ok: false, reason: 'assembly_reserve' })
     expect(l.reserveSttMinutes(10, T0)).toMatchObject({ ok: false, reason: 'assembly_reserve' })
   })
-  it('STT sessions are bounded to 20 minutes and 40/day', () => {
+  it('STT: default = NO daily minute cap (sessions still bounded to 20 min; the $ ceiling binds instead)', () => {
+    expect(LIMITS.assembly.dailyFlagshipListeningMinutes).toBe(0)
     const l = new BudgetLedger()
+    for (let i = 0; i < 5; i++) expect(l.reserveSttMinutes(60, T0)).toEqual({ ok: true, minutes: 20 }) // 100 min, 5 x 20 min
+    // $1/day / $0.45 per hour = 133 min, so the daily USD ceiling is what finally refuses.
+    for (let i = 0; i < 2; i++) l.reserveSttMinutes(60, T0)
+    expect(l.reserveSttMinutes(60, T0)).toMatchObject({ ok: false, reason: 'assembly_daily_usd' })
+  })
+  it('STT: an opt-in daily minute cap (REVOICE_STT_DAILY_MINUTES) still works', () => {
+    const l = new BudgetLedger({ ...LIMITS, assembly: { ...LIMITS.assembly, dailyFlagshipListeningMinutes: 40 } } as unknown as typeof LIMITS)
     expect(l.reserveSttMinutes(60, T0)).toEqual({ ok: true, minutes: 20 })
     expect(l.reserveSttMinutes(60, T0)).toEqual({ ok: true, minutes: 20 })
     expect(l.reserveSttMinutes(5, T0)).toMatchObject({ ok: false, reason: 'stt_daily_minutes' })
-    // new day resets
-    expect(l.reserveSttMinutes(5, T0 + 86_400_000)).toEqual({ ok: true, minutes: 5 })
+    expect(l.reserveSttMinutes(5, T0 + 86_400_000)).toEqual({ ok: true, minutes: 5 }) // new day resets
+  })
+  it('STT: resetStt() clears a stuck allowance (operator quota reset)', () => {
+    const l = new BudgetLedger({ ...LIMITS, assembly: { ...LIMITS.assembly, dailyFlagshipListeningMinutes: 40 } } as unknown as typeof LIMITS)
+    l.reserveSttMinutes(20, T0)
+    l.reserveSttMinutes(20, T0)
+    expect(l.reserveSttMinutes(1, T0)).toMatchObject({ ok: false })
+    expect(l.resetStt(T0)).toBe(40)
+    expect(l.reserveSttMinutes(20, T0)).toEqual({ ok: true, minutes: 20 })
   })
   it('$1/day ceiling binds', () => {
     const l = new BudgetLedger({ ...LIMITS, assembly: { ...LIMITS.assembly, dailyTtsChars: 1_000_000 } } as unknown as typeof LIMITS)

@@ -11,6 +11,25 @@ export const PRICES = {
   ttsPerChar: 0.000015, // incl. spaces and punctuation
 } as const
 
+/** Reads a non-negative integer from the server environment (the browser bundle never sees non-NEXT_PUBLIC vars, so it gets the default). */
+function envInt(name: string, fallback: number): number {
+  const raw = typeof process !== 'undefined' ? process.env?.[name] : undefined
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * Daily listening-minute cap per device. **0 = NO cap** (the default).
+ *
+ * This used to be a hard 40 min/device/day. Because every "Start listening" RESERVES up to 20 minutes up-front and the
+ * in-memory refund only worked for rooms created on the same serverless instance, two or three start/stop cycles (or one
+ * LiveKit attempt that fell back to direct listening) used the whole allowance and the owner saw
+ * "Could not start listening (stt daily minutes)". The session length cap (20 min), the daily USD ceiling and the protected
+ * credit reserve already bound spend, so the minute cap is now opt-in: set REVOICE_STT_DAILY_MINUTES=40 to restore it.
+ */
+export const STT_DAILY_MINUTES_CAP = envInt('REVOICE_STT_DAILY_MINUTES', 0)
+
 export const LIMITS = {
   groq: {
     outstandingPerConversation: 1,
@@ -23,13 +42,15 @@ export const LIMITS = {
   },
   assembly: {
     interactiveSessionMinutes: 20,
-    dailyFlagshipListeningMinutes: 40,
+    dailyFlagshipListeningMinutes: STT_DAILY_MINUTES_CAP, // 0 = no cap (see STT_DAILY_MINUTES_CAP)
     dailyTtsChars: 5_000,
     dailyUsd: 1.0,
     totalCreditUsd: 100,
     protectedReserveUsd: 15, // never automatically spent
   },
   livekit: {
+    /** LiveKit Build: up to 5 concurrently connected agent sessions (docs: quotas-and-limits → Agent session concurrency). */
+    concurrentAgentSessions: 5,
     monthlyAgentMinutes: 1000,
     plannedAgentMinutes: 840,
     monthlyInboundPhoneMinutes: 40, // of the 50 included, leaving 10 headroom
@@ -265,7 +286,8 @@ export class BudgetLedger {
   reserveSttMinutes(requested: number, now = Date.now(), profile: SttProfile = 'flagship'): { ok: true; minutes: number } | { ok: false; reason: DenyReason } {
     const a = this.limits.assembly
     const s = this.state(now)
-    const left = a.dailyFlagshipListeningMinutes - s.sttMinutes
+    // 0 = no daily minute cap: only the session length, the daily USD ceiling and the protected reserve apply.
+    const left = a.dailyFlagshipListeningMinutes > 0 ? a.dailyFlagshipListeningMinutes - s.sttMinutes : Number.POSITIVE_INFINITY
     const minutes = Math.min(requested, a.interactiveSessionMinutes, left)
     if (minutes <= 0) return { ok: false, reason: 'stt_daily_minutes' }
     const usd = (minutes / 60) * sttRatePerHour(profile)
@@ -275,6 +297,17 @@ export class BudgetLedger {
     s.usd += usd
     this.lifetimeUsd += usd
     return { ok: true, minutes }
+  }
+
+  /** Operator reset: forget today's (and any older) listening reservations so a leaked/stuck allowance is cleared. */
+  resetStt(now = Date.now()) {
+    const s = this.state(now)
+    const usd = (s.sttMinutes / 60) * PRICES.sttFlagshipPerHour
+    s.usd = Math.max(0, s.usd - usd)
+    this.lifetimeUsd = Math.max(0, this.lifetimeUsd - usd)
+    const cleared = s.sttMinutes
+    s.sttMinutes = 0
+    return cleared
   }
 
   /**

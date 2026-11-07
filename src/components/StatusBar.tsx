@@ -68,7 +68,14 @@ export function StatusBar(props: {
           </summary>
           <div className="grid gap-3 py-2 sm:grid-cols-4">
             <Meter label="Voice characters" used={b.tts.chars} limit={b.tts.charsLimit} />
-            <Meter label="Listening minutes" used={b.stt.minutes} limit={b.stt.minutesLimit} unit="min" />
+            {b.stt.minutesLimit > 0 ? (
+              <Meter label="Listening minutes" used={b.stt.minutes} limit={b.stt.minutesLimit} unit="min" />
+            ) : (
+              <div className="grid gap-1 text-xs">
+                <span className="rv-muted font-semibold">Listening minutes</span>
+                <span className="font-bold tabular-nums">{b.stt.minutes} min today · no daily cap</span>
+              </div>
+            )}
             <Meter label="Suggestions" used={b.groq.requests} limit={b.groq.requestsLimit} />
             <Meter label="Spend today" used={b.usd.today} limit={b.usd.todayLimit} unit="$" />
           </div>

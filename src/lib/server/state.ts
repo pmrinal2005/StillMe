@@ -163,7 +163,19 @@ export async function phoneMonthUsedDurable(
  *   that idempotent (`where status = 'reserved'`).
  * Returns false if this room was already settled here.
  */
-export function settleLocalStt(userId: string, room: string, usedMinutes: number, now = Date.now()): boolean {
+export function settleLocalStt(
+  userId: string,
+  room: string,
+  usedMinutes: number,
+  now = Date.now(),
+  /**
+   * Quota-lockout fix: on serverless hosting the instance that settles a session is usually NOT the one that reserved it, so
+   * the cache lookup below misses and the reservation used to stay charged in the reserving instance's ledger until the next
+   * cold start ("Could not start listening (stt daily minutes)" after two or three tries). A valid signed session ticket
+   * carries what was reserved, so this instance can still refund its own ledgers (clamped at zero, once per room).
+   */
+  fromTicket?: { sttMinutes: number; sttDay: string },
+): boolean {
   const st = g.__rv!
   for (const [k, t] of st.settledRooms) if (now - t > 86_400_000) st.settledRooms.delete(k)
   if (st.settledRooms.has(room)) return false
@@ -173,6 +185,21 @@ export function settleLocalStt(userId: string, room: string, usedMinutes: number
     ledgerFor(userId).releaseSttMinutes(s.sttMinutes, usedMinutes, s.sttDay, now)
     st.projectLedger.releaseSttMinutes(s.sttMinutes, usedMinutes, s.sttDay, now)
     st.sessions.delete(userId)
+  } else if (fromTicket && fromTicket.sttMinutes > 0) {
+    ledgerFor(userId).releaseSttMinutes(fromTicket.sttMinutes, usedMinutes, fromTicket.sttDay, now)
+    st.projectLedger.releaseSttMinutes(fromTicket.sttMinutes, usedMinutes, fromTicket.sttDay, now)
   }
   return true
+}
+
+/** Operator tool: clear every in-memory listening-minute reservation on THIS instance (quota reset). */
+export function resetSttLedgers(now = Date.now()): { cleared: number } {
+  const st = g.__rv!
+  let cleared = 0
+  for (const l of st.ledgers.values()) cleared += l.resetStt(now)
+  cleared += st.projectLedger.resetStt(now)
+  for (const l of (globalThis as unknown as { __rvNetPools?: Map<string, import('../budget').BudgetLedger> }).__rvNetPools?.values() ?? []) cleared += l.resetStt(now)
+  st.sessions.clear()
+  st.settledRooms.clear()
+  return { cleared }
 }
