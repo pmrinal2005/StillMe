@@ -9,6 +9,34 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0l. Verification pass on the cloned repo (this release)
+
+Cloned `pmrinal2005/StillMe`, audited it against the TODO list, and re-ran every check. TODO 1-3 and the owner grace work were already in the code; this pass found and fixed the remaining failures.
+
+| Item | Finding | Fix |
+|---|---|---|
+| `.env.example` | 2 tests failed: it still listed `NEXT_PUBLIC_SUPABASE_*`, defaulted `REVOICE_ALLOW_BROWSER_STT=false` (the code defaults to ON) and lacked `CRON_SECRET` (used by the Vercel cron in `vercel.json`) | Rewritten: no public Supabase vars, browser STT `true`, `CRON_SECRET=` added, grouped by provider |
+| `env.example` | Duplicate of `.env.example` | Removed |
+| `vercel.json` / `.vercelignore` | Verified: Next.js preset, `npm ci`, `npm run build`, 60 s API duration, no-store API headers, daily purge cron, no Cloudflare/Hono | Unchanged |
+
+### Checks (live, this pass)
+
+| Check | Result |
+|---|---|
+| `tsc --noEmit` | clean |
+| `vitest` | 24 files, **467/467** pass (was 3 failing) |
+| `pytest` (worker) | **120/120** pass |
+| `next build` + secret scan | pass; 41 browser files, no leaks |
+| AssemblyAI REST `/v2/transcript` | 200 |
+| AssemblyAI streaming token | 200 |
+| TTS with numbers and dates ("March 3rd, 2027 ... 7:30 pm ... 555 0142") | 200, 64 chars billed |
+| `npm run smoke:live` | **28/28**: 24 library voices, Hindi rejected 422, `universal-3-6-pro` STT round trip |
+| `npm run smoke:worker` (plugin TTS to STT to TurnAdapter) | all pass; revisions strictly increase, one final |
+| Local `livekit-server` 1.13.11 + production build + real Python worker | worker registered and dispatched to the room; invite is a string; join returns a claim; invite is single-use (`invite_used`); claim rejoin keeps the same identity; garbage invite refused; ended session returns `session_ended`; room timeouts partner 300/120, tabletop 120/30 |
+| LiveKit quotas page (re-read) | Matches `LIMITS`: 5 agent sessions, 1,000 agent min, 100 participants, Server API 1,000 req/min, cold start 10-20 s, 50 inbound min |
+
+> The AssemblyAI key used for these checks was shared in chat and is **not** stored in this project. Rotate it, then set it in Vercel -> Settings -> Environment Variables.
+
 ## 0k. Partner link, worker-less captions, mode-aware session end, numbers/dates in auto-speak (this release)
 
 Deploys on **Vercel** (Next.js preset, `vercel.json` + `.vercelignore` included). No Cloudflare, no Hono, no sign-in anywhere.
