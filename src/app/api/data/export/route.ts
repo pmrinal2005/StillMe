@@ -25,4 +25,4 @@ async function handleGET(req: Request) {
   })
 }
 
-export const GET = withJsonErrors('account/export', handleGET)
+export const GET = withJsonErrors('data/export', handleGET)

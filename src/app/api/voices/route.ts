@@ -56,8 +56,8 @@ async function handlePOST(req: Request) {
   const store = voiceStoreFor(id.userId)
   // Cheap ownership pre-check BEFORE spending a (billed) provider call on someone else's / a tombstoned id.
   const claim = await store.claim(b.voiceId)
-  if (claim === 'tombstoned') return json({ error: 'voice_tombstoned', message: 'This voice belonged to a deleted account and cannot be registered.' }, 409)
-  if (claim && claim.userId !== id.userId) return json({ error: 'voice_claimed', message: 'This voice id is already registered to another account.' }, 409)
+  if (claim === 'tombstoned') return json({ error: 'voice_tombstoned', message: 'This voice belonged to deleted device data and cannot be registered.' }, 409)
+  if (claim && claim.userId !== id.userId) return json({ error: 'voice_claimed', message: 'This voice id is already registered to another device.' }, 409)
 
   const text = 'Ok'
   const spend = await reserveTtsSpend(id, req, codePoints(text))

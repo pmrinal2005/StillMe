@@ -69,7 +69,7 @@ const ticketHeader = (): Record<string, string> => (sessionTicket ? { 'x-revoice
 
 export const api = {
   status: () => call<StatusResponse>('/api/status'),
-  /** B11: the server decides voice authorization from its own registry; the client sends no consent attestation. */
+  /** B11: the server decides which voices may be used from its own registry; the client sends no consent attestation. */
   approve: (req: ApproveRequest, _voice?: ClonedVoiceProfile) =>
     call<{ approval: Approval }>('/api/approve', {
       method: 'POST',

@@ -103,7 +103,7 @@ export async function evaluateCandidateSource(opts: {
     return deny(409, 'stale_candidate', v.reason === 'expired' ? 'expired' : 'invalid_proof', v.reason === 'expired' ? 'These suggestions expired. Review fresh ones.' : 'These suggestions cannot be verified. Review fresh ones.')
   }
   const p = v.payload
-  if (p.owner !== owner) return deny(403, 'wrong_user', 'wrong_user', 'These suggestions belong to another account.')
+  if (p.owner !== owner) return deny(403, 'wrong_user', 'wrong_user', 'These suggestions belong to another device.')
   if (p.set !== source.candidateSetId || !sameTurn(p.turn, source.turn)) return deny(409, 'stale_candidate', 'invalid_proof', 'These suggestions do not match the conversation turn they claim.')
   if (p.turn.conversationId !== body.conversationId || p.turn.generation !== body.generation) {
     return deny(409, 'stale_candidate', 'conversation_changed', 'The conversation changed after this suggestion was drafted.')

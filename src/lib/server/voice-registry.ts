@@ -172,7 +172,7 @@ export function supabaseVoiceStore(): VoiceStore | null {
         quality_checked: p.qualityChecked, consent_at: iso(p.consentAt), provider_expires_at: p.providerExpiresAt ? iso(p.providerExpiresAt) : null,
       })
       if (error) {
-        if (error.code === '23505') throw new VoiceRegistryError('voice_claimed', 409, 'This voice id is already registered to an account.')
+        if (error.code === '23505') throw new VoiceRegistryError('voice_claimed', 409, 'This voice id is already registered to another device.')
         dbFail(error)
       }
     },
@@ -246,8 +246,8 @@ export async function registerClonedVoice(store: VoiceStore, userId: string, inp
   if (isLibraryVoice(input.voiceId)) throw new VoiceRegistryError('library_voice', 400, 'Library voices need no registration.')
   if (!isLibraryVoice(input.fallbackVoiceId)) throw new VoiceRegistryError('invalid_fallback', 400, 'The fallback must be a library voice.')
   const claim = await store.claim(input.voiceId)
-  if (claim === 'tombstoned') throw new VoiceRegistryError('voice_tombstoned', 409, 'This voice belonged to a deleted account and cannot be registered.')
-  if (claim && claim.userId !== userId) throw new VoiceRegistryError('voice_claimed', 409, 'This voice id is already registered to another account.')
+  if (claim === 'tombstoned') throw new VoiceRegistryError('voice_tombstoned', 409, 'This voice belonged to deleted device data and cannot be registered.')
+  if (claim && claim.userId !== userId) throw new VoiceRegistryError('voice_claimed', 409, 'This voice id is already registered to another device.')
   const existing = claim ? await store.get(userId, input.voiceId) : null
   const profile: ClonedVoiceProfile = {
     id: existing?.id ?? randomId(16).replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/, '$1-$2-$3-$4-$5'),

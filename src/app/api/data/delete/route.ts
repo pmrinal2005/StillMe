@@ -38,4 +38,4 @@ async function handlePOST(req: Request) {
   )
 }
 
-export const POST = withJsonErrors('account/delete', handlePOST)
+export const POST = withJsonErrors('data/delete', handlePOST)

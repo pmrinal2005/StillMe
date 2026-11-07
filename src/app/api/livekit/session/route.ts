@@ -62,7 +62,7 @@ async function handlePOST(req: Request) {
   // (Library voices are open; a cloned voice needs its server-side registration with complete, unexpired, unrevoked consent.)
   try {
     const va = await authorizeVoice(voiceStoreFor(id.userId), id, b.voiceId, env.assemblyRegion())
-    if (!va.ok) return json({ error: 'voice_not_authorized', reason: va.reason, message: 'This voice is not authorized for your account. Pick a library voice or renew consent.' }, 403)
+    if (!va.ok) return json({ error: 'voice_not_authorized', reason: va.reason, message: 'This voice is not authorized for this device. Pick a library voice or renew consent.' }, 403)
   } catch (e) {
     if (e instanceof VoiceRegistryError) return json({ error: e.code, message: e.message }, e.status)
     throw e

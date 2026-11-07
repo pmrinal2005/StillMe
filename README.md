@@ -9,6 +9,14 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0g. No sign-in (this release)
+
+ReVOICE now has **no sign-in of any kind**: no accounts, passwords, OAuth, e-mail links, anonymous-auth provider or guest tier. Every browser is a *device*; the first API call mints a random device id stored in an HMAC-signed, HttpOnly `rv_device` cookie (see `src/lib/server/auth.ts`). That id maps to a deterministic UUID used for budgets, the cloned-voice registry, sessions and the phone bridge. Clearing cookies does not mint a fresh allowance (per-network and project-wide ledgers also apply). To keep a registered cloned voice across browsers, copy the **device key** from Privacy (`GET/POST /api/device`).
+
+Removed in this release: `AuthControls`, `client/supabase.ts`, `auth-providers.ts`, `auth-note.ts`, `prefs-sync.ts`, `/api/account/*` (replaced by `/api/data/export` and `/api/data/delete`), all `NEXT_PUBLIC_SUPABASE_*` variables and the Supabase origins in the CSP. Phrase boards, message bank and preferences live in IndexedDB on the device. Optional operator views use `REVOICE_OPERATOR_TOKEN`; registering a cloned voice can be gated with `REVOICE_CLONE_PASSCODE`.
+
+Verification: `tsc --noEmit` clean, `vitest` 332/332, `next build` + secret scan pass. `vercel.json` is included and verified for Vercel (Next.js framework preset, `npm ci`, `npm run build`).
+
 ## 0. Critical bug fixes (B1–B4)
 
 | # | Bug | Fix | Where |
@@ -164,7 +172,7 @@ Regression tests: `tests/bugfixes-d32-d46.test.ts` (69 tests) and `worker/tests/
 | `/` | User app: composer, Speak/Stop, suggestions, phrase boards, voice wardrobe, settings, message bank, privacy, metrics, phone, reconciliation |
 | `/join#<invite>` | Partner page. The invite is in the URL fragment, so it never reaches servers or Referer headers. Partner must give consent; only the microphone is published; coaching view |
 
-### API (all JSON — including unexpected errors: `{error, message, requestId}` + `x-revoice-request-id`; user routes need a Supabase bearer token, or the signed demo cookie when Supabase is not configured)
+### API (all JSON — including unexpected errors: `{error, message, requestId}` + `x-revoice-request-id`; no sign-in: every route identifies the caller by the signed, HttpOnly `rv_device` cookie, minted automatically on first request)
 | Method and path | Purpose |
 |---|---|
 | `GET /api/status` | Identity, provider readiness, budget snapshots, limits |
@@ -249,8 +257,8 @@ Presentation-only changes; no app logic changed. Tested in Chromium at 320×568 
 `vercel.json` pins the framework (`nextjs`), `npm ci`, `npm run build` (so the secret scan runs on every deploy), the `iad1` region, a 60 s max duration for API routes (within the Hobby limit), `no-store` on `/api/*`, and correct headers for `sw.js` and the manifest. Import the GitHub repo in Vercel, add the env vars from `.env.example` in Project Settings → Environment Variables, and deploy. The Python worker does **not** run on Vercel; it runs on LiveKit Cloud.
 
 ### Deployment sequence
-1. Configure a free OAuth provider in Supabase. Do not rely on default SMTP (limited to 2 emails/hour, team addresses only).
-2. Apply `supabase/migrations/*.sql`.
+1. (Optional) Create a free Supabase project as a **server-side durable store** and apply `supabase/migrations/*.sql` (through `0007_no_signin.sql`). There is no sign-in, no OAuth and no e-mail setup. Without Supabase the app still works, using process memory.
+2. Generate one `REVOICE_APPROVAL_SECRET` (it also signs the device cookie).
 3. Deploy Next.js to Vercel Hobby (personal, non-commercial use). Set the server env vars there.
 4. Deploy the worker to LiveKit Cloud Build. Use the same `REVOICE_APPROVAL_SECRET` as the web app.
 5. Add AssemblyAI and Groq keys. Speech goes through BYOK to AssemblyAI, not LiveKit Inference.
@@ -317,18 +325,14 @@ None of these can be done from code. Do them in order. Without any keys the app 
 2. Put the same value in `REVOICE_APPROVAL_SECRET` in both `.env.local` and `worker/.env`, and later in Vercel and LiveKit. The web app and worker must match exactly.
 3. If you skip this, the web app **and** the worker both derive the same secret as `HMAC-SHA256(LIVEKIT_API_SECRET, "revoice/approval-secret/v1")` (or from `ASSEMBLYAI_API_KEY` if LiveKit is not configured). In production with none of these set, approval endpoints fail closed. `/api/status` reports `approvalSecretSource`.
 
-### Step 2 — Supabase (sign-in and minimal database), free
-1. Sign up at https://supabase.com, then choose **New project**. Pick a region and set a database password.
+### Step 2 — Supabase (OPTIONAL server-side store), free
+There is **no sign-in anywhere in ReVOICE**. Supabase is only a server-side database for durable budgets, the cloned-voice registry and phone usage. Skip this step entirely for a first run; everything works from process memory (budgets then reset on a cold start).
+1. Sign up at https://supabase.com, then choose **New project**.
 2. Go to **Project Settings → API** and copy:
-   - Project URL → `NEXT_PUBLIC_SUPABASE_URL`
-   - `anon` public key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `service_role` key → `SUPABASE_SERVICE_ROLE_KEY` (**server only**; never put it in a `NEXT_PUBLIC_` variable)
-3. Open **SQL Editor**, then paste and run `supabase/migrations/0001_init.sql`, then `0002_phone_reconcile.sql`, then `0003_spend_control.sql` (A-series budget/spend control; until applied the app falls back to the legacy reserve_budget RPCs and `/api/status` reports `spendStore: "legacy"`).
-4. Set up OAuth sign-in. Default email sign-in is limited to 2 emails per hour, so don't rely on it.
-   - **GitHub:** at https://github.com/settings/developers choose **New OAuth App**. Set Homepage URL to your site URL, and the callback URL to `https://<your-project-ref>.supabase.co/auth/v1/callback`. Copy the Client ID and Secret into Supabase **Authentication → Providers → GitHub** and enable it.
-   - **Google (optional):** in Google Cloud Console go to **APIs & Services → Credentials → Create OAuth client ID** (Web). Use the same Supabase callback URL as the authorized redirect URI. Paste the ID and secret into Supabase **Providers → Google**.
-5. In Supabase **Authentication → URL Configuration**, set Site URL to your Vercel URL. Add `http://localhost:3000` and your Vercel URL to Redirect URLs.
-6. Note: free projects pause after 7 idle days. Restore them from the dashboard.
+   - Project URL → `SUPABASE_URL`
+   - `service_role` key → `SUPABASE_SERVICE_ROLE_KEY` (**server only**; never put it in a `NEXT_PUBLIC_` variable). The browser never talks to Supabase and no `anon` key is used.
+3. Open **SQL Editor**, then paste and run every file in `supabase/migrations/` in order (`0001` … `0007_no_signin.sql`).
+4. Free projects pause after 7 idle days. Restore them from the dashboard.
 
 ### Step 3 — AssemblyAI (speech-to-text and text-to-speech), BYOK
 1. Sign up at https://www.assemblyai.com/dashboard, then open **API Keys** and copy the key into `ASSEMBLYAI_API_KEY` (web and worker).
@@ -363,21 +367,19 @@ None of these can be done from code. Do them in order. Without any keys the app 
 ### Step 6 — Run locally
 1. Run `npm run build`. The build fails if any secret leaks into browser files.
 2. Start it with `npm start` (or `pm2 start ecosystem.config.cjs`), then open http://localhost:3000.
-3. Run the tests: `npm test` (140 tests) and `cd worker && pytest -q` (47 tests).
+3. Run the tests: `npm test` (332 tests) and `cd worker && pytest -q` (117 tests; install `worker/requirements-dev.txt` first).
 4. Microphone and audio need HTTPS or `localhost`. Test on a phone through your deployed Vercel URL.
 
 ### Step 7 — Deploy the frontend to Vercel Hobby
 1. Push the project to a GitHub repo (for example, your `StillMe` repo).
 2. At https://vercel.com/new, import the repo. `vercel.json` already sets the framework, install/build commands, region, function duration and headers.
-3. In **Project Settings → Environment Variables**, add every variable from `.env.example` with real values, plus `REVOICE_APPROVAL_SECRET` (recommended) and optionally `REVOICE_OPERATOR_IDS` (comma-separated Supabase user IDs allowed to record reconciliations). Only the two `NEXT_PUBLIC_SUPABASE_*` variables may have the public prefix.
+3. In **Project Settings → Environment Variables**, add every variable from `.env.example` with real values, plus `REVOICE_APPROVAL_SECRET` (recommended) and optionally `REVOICE_OPERATOR_TOKEN` (unlocks spend reconciliation when pasted in Settings → Operator) and `CRON_SECRET` (Vercel Cron for `/api/cron/purge`). No variable may have the `NEXT_PUBLIC_` prefix; the secret scan in `postbuild` fails the build if a secret reaches the browser.
 4. Deploy, then put the Vercel URL into:
-   - Supabase Site URL and Redirect URLs
-   - the GitHub/Google OAuth homepage
    - the worker's `REVOICE_APP_URL` secret
 5. Keep `REVOICE_ALLOW_BROWSER_STT=false` in production. It's only for a trusted private demo.
 
 ### Step 8 — First live check (budget at most $2)
-1. Sign in, type a sentence and press **Speak**. You should hear the AssemblyAI voice.
+1. Open the site (no sign-in), type a sentence and press **Speak**. You should hear the AssemblyAI voice.
 2. Start a **Partner link** session, open the link on a second phone, give consent, and speak. Captions and three suggestions should appear. Nothing is spoken until you approve.
 3. Press **STOP** while it's speaking; audio must stop at once.
 4. Compare spend in the AssemblyAI, Groq and LiveKit dashboards with **Metrics & measurements → Reconciliation**.

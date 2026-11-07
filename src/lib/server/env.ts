@@ -53,7 +53,7 @@ export const env = {
   livekitSecret: () => opt('LIVEKIT_API_SECRET'),
   livekitAgentName: () => opt('LIVEKIT_AGENT_NAME') ?? 'revoice-worker',
   /** Server-side durable store only (the browser never talks to Supabase). `SUPABASE_URL` preferred; the legacy name still works. */
-  supabaseUrl: () => opt('SUPABASE_URL') ?? opt('NEXT_PUBLIC_SUPABASE_URL'),
+  supabaseUrl: () => opt('SUPABASE_URL'),
   supabaseService: () => opt('SUPABASE_SERVICE_ROLE_KEY'),
   allowBrowserStt: () => opt('REVOICE_ALLOW_BROWSER_STT') === 'true',
   /** Included US number only — the owner enables this ONLY if activation requires no new spending. */
