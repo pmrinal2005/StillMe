@@ -21,7 +21,7 @@ const Body = z.object({
 })
 
 /**
- * Browser-direct STT (trusted private demo ONLY; disabled unless REVOICE_ALLOW_BROWSER_STT=true).
+ * Browser-direct STT (guest-launchable; ON by default, disable with REVOICE_ALLOW_BROWSER_STT=false).
  * Each mint reserves bounded listening minutes durably (A7); the token's max session duration enforces the cap,
  * and the client settles the reservation through /api/livekit/end with the returned ticket.
  */

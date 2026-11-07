@@ -47,7 +47,7 @@ export function StatusBar(props: {
         <Pill ok={online} label={online ? 'Online' : 'Offline — local phrases & device voice'} />
         <Pill ok={!!p?.assemblyai} label={p?.assemblyai ? 'Voice service' : 'Voice service not configured'} />
         <Pill ok={p?.groq ? true : 'warn'} label={p?.groq ? 'Suggestions' : 'Suggestions off'} />
-        <Pill ok={p?.livekit || p?.browserStt ? true : 'warn'} label={p?.livekit ? 'Listening (LiveKit)' : p?.browserStt ? 'Listening (direct demo)' : 'Listening unavailable'} />
+        <Pill ok={p?.livekit || p?.browserStt ? true : 'warn'} label={p?.livekit ? 'Listening (LiveKit)' : p?.browserStt ? 'Listening (this device)' : 'Listening unavailable'} />
         <li className="rv-badge" aria-live="polite">
           {listening === 'listening' ? <span className="rv-eq" aria-hidden="true"><i /><i /><i /><i /></span> : <Icon name="headphones" size={13} />}
           Listening: {listening}

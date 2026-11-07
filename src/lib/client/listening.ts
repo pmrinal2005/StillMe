@@ -12,11 +12,19 @@ import { Room, RoomEvent, Track, type RemoteParticipant, type LocalTrackPublicat
 import { ControlMessage, DataTopics, StatusMessage, TranscriptMessage, type Approval } from '../contracts'
 import { ownerPlaysLocally, type ConversationMode } from '../audio-routing'
 import { CAPTURE_WORKLET_SRC } from './downsample'
+import { EnergyVad, VoiceActivityEmitter } from '../energy-vad'
 
 export interface TurnUpdate { turnId: number; text: string; endOfTurn: boolean; /** C #30: source revision stamped by the worker (absent for browser-direct STT) */ revision?: number }
 export interface ListenerEvents {
   onTurn: (t: TurnUpdate) => void
   onSpeechStarted?: () => void
+  /**
+   * The partner's microphone is carrying voice RIGHT NOW (throttled ~10 Hz). Browser-direct: an energy VAD on the captured
+   * PCM (never while our own voice is playing). LiveKit: the worker's speech-started signal (word changes in partial
+   * transcripts are picked up by the turn detector itself).
+   * Drives the auto turn-taking silence clock.
+   */
+  onVoiceActivity?: (now: number) => void
   onStatus: (s: { state: 'connecting' | 'listening' | 'paused' | 'reconnecting' | 'closed' | 'error'; detail?: string }) => void
   onWorkerStatus?: (s: ReturnType<typeof StatusMessage.parse>) => void
   onPartnerPresence?: (present: boolean) => void
@@ -56,8 +64,10 @@ export class LiveKitListener {
           if (topic === DataTopics.transcript) {
             const m = TranscriptMessage.safeParse(raw)
             if (m.success) {
-              if (m.data.speechStarted) this.ev.onSpeechStarted?.()
-              else this.ev.onTurn({ turnId: m.data.turnId, text: m.data.text, endOfTurn: m.data.endOfTurn, revision: m.data.revision })
+              if (m.data.speechStarted) {
+                this.ev.onVoiceActivity?.(Date.now()) // real voice onset; a (final) transcript arrives AFTER speech ended and is not activity
+                this.ev.onSpeechStarted?.()
+              } else this.ev.onTurn({ turnId: m.data.turnId, text: m.data.text, endOfTurn: m.data.endOfTurn, revision: m.data.revision })
             }
           } else if (topic === DataTopics.status) {
             const s = StatusMessage.safeParse(raw)
@@ -173,10 +183,15 @@ export class DirectSttListener {
   private node: AudioWorkletNode | null = null
   private gated = false
   private watchdog: ReturnType<typeof setTimeout> | null = null
-  constructor(private ev: ListenerEvents, private getUrl: () => Promise<{ wsUrl: string; maxSessionSeconds: number }>) {}
+  private vad: VoiceActivityEmitter
+  constructor(private ev: ListenerEvents, private getUrl: () => Promise<{ wsUrl: string; maxSessionSeconds: number }>) {
+    // Energy VAD on the captured 16 kHz PCM → onVoiceActivity (task: auto turn-taking silence clock).
+    this.vad = new VoiceActivityEmitter(new EnergyVad(), (now) => this.ev.onVoiceActivity?.(now))
+  }
 
   async start() {
     this.ev.onStatus({ state: 'connecting' })
+    this.vad.reset()
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } })
     this.ctx = new AudioContext()
     const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET_SRC], { type: 'application/javascript' }))
@@ -209,9 +224,12 @@ export class DirectSttListener {
     this.node = new AudioWorkletNode(this.ctx, 'rv-capture')
     this.node.port.onmessage = (e) => {
       if (this.ws?.readyState !== WebSocket.OPEN) return
+      const buf = e.data as ArrayBuffer
+      // Voice activity is measured on what the PARTNER mic carried — never while gated (our own voice is playing).
+      try { this.vad.frame(new Int16Array(buf.slice(0)), performance.now() + performance.timeOrigin, this.gated) } catch {}
       // While gated, send silence (keeps timing) — note: billing continues while connected.
-      if (this.gated) this.ws.send(new Int16Array((e.data as ArrayBuffer).byteLength / 2).buffer)
-      else this.ws.send(e.data)
+      if (this.gated) this.ws.send(new Int16Array(buf.byteLength / 2).buffer)
+      else this.ws.send(buf)
     }
     src.connect(this.node)
     // Client-side watchdog: terminate before the server cap to avoid billed overrun.

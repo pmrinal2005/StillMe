@@ -50,6 +50,8 @@ export interface SpeakOptions {
   partnerSpeaking: boolean
   /** Phrase-board phrase the owner marked as cacheable (library voices only). */
   cacheable?: boolean
+  /** Spoken by auto turn-taking after the owner's veto window (metrics only — the approval path is identical). */
+  auto?: boolean
 }
 
 export interface SpeechDeps {

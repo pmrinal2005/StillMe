@@ -47,6 +47,8 @@ import { CandidateSet as CandidateSetSchema, INPUT_LANGUAGES, type Candidate, ty
 import { randomId, sha256Hex } from '@/lib/hash'
 import { adoptProviderExpiry, clonedVoiceUsable, fallbackVoiceFor, isLibraryVoice, LIBRARY_VOICES, type ClonedVoiceProfile } from '@/lib/voices'
 import { OUTPUT_BCP47 } from '@/lib/languages'
+import { TurnTakingCard, TurnTakingSettings } from './TurnTakingControls'
+import { AutoTurnController, type AutoPick, type AutoTurnAction, type AutoTurnSnapshot } from '@/lib/turn-taking'
 
 type Tab = 'session' | 'voice' | 'settings' | 'bank' | 'privacy' | 'metrics'
 type Mode = 'tabletop' | 'partner-link' | 'remote'
@@ -71,6 +73,7 @@ interface HistoryItem { speaker: 'partner' | 'user'; text: string }
 const INTENT_ORDER: Record<Candidate['intent'], number> = { continue: 0, clarify: 1, decline: 2, custom: 2 }
 const stableOrder = (s: CandidateSet): CandidateSet => ({ ...s, candidates: [...s.candidates].sort((a, b) => INTENT_ORDER[a.intent] - INTENT_ORDER[b.intent]) })
 const IDLE_BACKGROUND_END_MS = 3 * 60_000
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 export function ReVoiceApp() {
   const { prefs, update } = usePrefs()
@@ -112,6 +115,9 @@ export function ReVoiceApp() {
 
   const [clones, setClones] = useState<ClonedVoiceProfile[]>([])
 
+  // auto turn-taking (opt-in): live snapshot of the pure controller for the status card
+  const [autoSnap, setAutoSnap] = useState<AutoTurnSnapshot | null>(null)
+
   // refs (callbacks from listeners must see current values)
   const prefsRef = useRef(prefs)
   prefsRef.current = prefs
@@ -149,6 +155,16 @@ export function ReVoiceApp() {
   const workerGated = useRef(false)
   const playerRef = useRef<PcmStreamPlayer | null>(null)
   if (!playerRef.current && typeof window !== 'undefined') playerRef.current = new PcmStreamPlayer()
+  // auto turn-taking
+  const autoRef = useRef<AutoTurnController | null>(null)
+  if (!autoRef.current) autoRef.current = new AutoTurnController()
+  /** The candidate set the countdown is about to speak from (kept so the server-signed proof travels with the approval). */
+  const autoDraftRef = useRef<{ set: CandidateSet; text: string } | null>(null)
+  /** The most recent successful draft, so an auto reply REUSES the draft already made for a final transcript (no extra Groq call). */
+  const lastDraftRef = useRef<{ set: CandidateSet; turnId: number; hash: string; text: string; final: boolean } | null>(null)
+  const autoKeyRef = useRef('')
+  const fallbackRef = useRef<((reason: string) => Promise<void>) | null>(null)
+  const fallingBack = useRef(false)
 
   // ---------------------------------------------------------------- voice resolution
   const region = status?.providers.region ?? 'us'
@@ -270,6 +286,7 @@ export function ReVoiceApp() {
       // cleared, losing the owner's words).
       onHeard: ({ text, opts }) => {
         count('approvedTurns')
+        if (opts.auto) count('autoSpoken')
         const src = opts.source
         if (src) {
           count('aiApproved')
@@ -379,6 +396,7 @@ export function ReVoiceApp() {
       // Drop if the conversation already moved on materially.
       if (tracker.staleness(parsed.data.turn, turn.text)) return 'ok'
       const next = stableOrder(parsed.data)
+      lastDraftRef.current = { set: next, turnId: turn.turnId, hash: turn.hash, text: turn.text, final }
       const cur = setRef.current
       if (cur && engage.current.active()) {
         // Selection stability: never move targets under the user's cursor (C #29: only while the engagement lease is live).
@@ -452,6 +470,7 @@ export function ReVoiceApp() {
     // C #30: `apply` ignores a message whose source revision is not newer than the one already applied.
     const { turn, changed } = await tracker.apply(t)
     if (!changed) return
+    autoRef.current?.partnerTurn({ turnId: turn.turnId, text: turn.text, endOfTurn: turn.endOfTurn }, Date.now())
     if (isNew) marks.current.firstPartial = performance.now()
     setTurns(tracker.all().slice(-5))
 
@@ -492,6 +511,44 @@ export function ReVoiceApp() {
     return () => clearInterval(t)
   }, [speech])
 
+  // ---------------------------------------------------------------- auto turn-taking: owner presence + veto
+  /** The owner did something deliberate: the dead-man counter of automatic replies restarts. */
+  const humanActed = () => autoRef.current?.userInteracted()
+  const outputRef = useRef<OutputState>(output)
+  outputRef.current = output
+  const lastSnapRef = useRef<AutoTurnSnapshot | null>(null)
+  /** Push the controller's state to React only when something the owner can SEE changed (the clock ticks 5x/s). */
+  const refreshAutoSnap = useCallback(() => {
+    const ctl = autoRef.current
+    if (!ctl) return
+    const next = ctl.snapshot(Date.now())
+    const prev = lastSnapRef.current
+    if (next.notice?.kind === 'blocked' && prev?.notice?.at !== next.notice.at) count('autoBlocked')
+    const same =
+      !!prev && prev.enabled === next.enabled && prev.phase === next.phase && prev.consecutive === next.consecutive &&
+      prev.pick?.candidateId === next.pick?.candidateId && prev.notice?.at === next.notice?.at && prev.silenceMs === next.silenceMs &&
+      Math.abs(prev.silenceProgress - next.silenceProgress) < 0.03 && Math.abs(prev.vetoProgress - next.vetoProgress) < 0.02 &&
+      Math.ceil(prev.vetoRemainingMs / 1000) === Math.ceil(next.vetoRemainingMs / 1000)
+    if (same) return
+    lastSnapRef.current = next
+    setAutoSnap(next)
+  }, [])
+  /** Cancel a drafting/countdown automatic reply. The draft goes into the message box (the owner's own words from there). */
+  const autoCancel = useCallback((reason = 'user_cancel') => {
+    const ctl = autoRef.current
+    if (!ctl) return
+    const p = ctl.cancel(reason, Date.now())
+    if (p) {
+      count('autoCancelled')
+      autoDraftRef.current = null
+      if (!composerValueRef.current.trim()) {
+        setComposer(p.text)
+        speech?.edit(p.text)
+      }
+    }
+    refreshAutoSnap()
+  }, [speech, refreshAutoSnap])
+
   // ---------------------------------------------------------------- speaking
   const speakDevice = useCallback((text: string) => {
     if (!('speechSynthesis' in window)) return setNotice('This device has no built-in voice.')
@@ -517,6 +574,7 @@ export function ReVoiceApp() {
 
   const doSpeak = useCallback(async (text: string, opts: { cacheable?: boolean; speakNow?: boolean; confirmed?: boolean } = {}) => {
     if (!text.trim() || !speech) return
+    humanActed()
     setNotice(null)
     if (prefsRef.current.confirmBeforeSpeak && !opts.confirmed) {
       setConfirming({ text, cacheable: !!opts.cacheable, speakNow: !!opts.speakNow })
@@ -557,10 +615,12 @@ export function ReVoiceApp() {
 
   const stop = useCallback(() => {
     marks.current.stopPressed = performance.now()
+    autoCancel('user_stop')
+    humanActed()
     speech?.stop()
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
     count('stops')
-  }, [speech])
+  }, [speech, autoCancel])
 
   // Global keys: Escape = Stop (always), Ctrl/Cmd+Enter = Speak composer.
   useEffect(() => {
@@ -581,6 +641,7 @@ export function ReVoiceApp() {
 
   // Partner coaching presence ("composing…", never the draft content).
   const onComposerChange = (v: string) => {
+    if (v) humanActed()
     setComposer(v)
     speech?.edit(v)
     const l = listenerRef.current
@@ -596,6 +657,139 @@ export function ReVoiceApp() {
     if (l instanceof LiveKitListener) void l.presence(true, true)
     void doSpeak(prefs.holdTurnPhrase, { speakNow: true, cacheable: true })
   }
+
+  // ---------------------------------------------------------------- auto turn-taking (opt-in, OFF by default)
+  /**
+   * Draft for the turn the silence detector fired on. REUSES the draft the app already made for the final transcript (the
+   * automatic draft starts the moment the turn ends, long before the silence threshold); only asks Groq again when there is none.
+   */
+  const autoDraft = useCallback(async (turnId: number) => {
+    const ctl = autoRef.current
+    if (!ctl) return
+    const key = String(turnId)
+    if (autoKeyRef.current === key) return
+    autoKeyRef.current = key
+    try {
+      const tracker = trackerRef.current
+      const turn = tracker.get(turnId)
+      const st = statusRef.current
+      if (!turn) return ctl.draftFailed('no_turn', 'That turn is gone, so I did not reply.', Date.now())
+      if (!prefsRef.current.aiSuggestions || !st?.providers.groq) return ctl.draftFailed('suggestions_off', 'Auto turn-taking needs AI suggestions. Turn them on in Settings.', Date.now())
+      const usable = () => {
+        const d = lastDraftRef.current
+        return d && d.turnId === turnId && d.hash === turn.hash ? d : null
+      }
+      const deadline = Date.now() + 9000
+      let asked = false
+      for (;;) {
+        const d = usable()
+        if (d) {
+          const r = ctl.draftReady({ set: d.set, turnId, partnerText: turn.text }, Date.now())
+          if (r.ok) autoDraftRef.current = { set: d.set, text: turn.text }
+          return
+        }
+        if (ctl.phase !== 'drafting') return // cancelled / dropped (partner resumed) while waiting
+        if (Date.now() > deadline) break
+        if (suggAbort.current) { await sleep(250); continue } // a request (the automatic one for the final transcript) is in flight: wait for it
+        if (asked) break
+        asked = true
+        await requestSuggestionsRef.current?.(turn, true, undefined, 'auto')
+      }
+      ctl.draftFailed('draft_unavailable', 'I could not draft a reply in time, so I did not speak.', Date.now())
+    } finally {
+      autoKeyRef.current = ''
+      refreshAutoSnap()
+    }
+  }, [refreshAutoSnap])
+
+  /**
+   * The veto window elapsed (or the owner pressed "Say it"). The words are NOT spoken yet: they go through the SAME SpeechController
+   * request as a typed message — a server-signed approval of the exact text (candidate proof + Conversation Brake verified on the
+   * server) — and only then does TTS run. Failure leaves nothing spoken and a visible notice.
+   */
+  const autoSpeak = useCallback(async (pick: AutoPick) => {
+    const ctl = autoRef.current
+    if (!ctl || !speech) return
+    const done = (r: string) => {
+      ctl.speakResult(r, Date.now())
+      refreshAutoSnap()
+    }
+    const d = autoDraftRef.current
+    const tracker = trackerRef.current
+    const cand = d?.set.candidates.find((c) => c.id === pick.candidateId)
+    if (!d || d.set.id !== pick.setId || !cand || cand.text !== pick.text) return done('stale')
+    if (!navigator.onLine) return done('offline')
+    const latest = tracker.latest()
+    if (!latest || tracker.staleness(d.set.turn, d.text)) return done('stale')
+    const source: SpeakSource = {
+      candidateSetId: d.set.id,
+      candidateId: cand.id,
+      turn: d.set.turn,
+      edited: false,
+      proof: d.set.proof,
+      draftedFrom: d.text,
+      current: { turn: tracker.ref(latest), text: latest.text },
+    }
+    autoDraftRef.current = null
+    setNotice(null)
+    const r = await speech.request(cand.text, { source, partnerSpeaking: false, speakNow: true, auto: true })
+    done(r)
+  }, [speech, refreshAutoSnap])
+
+  const runAutoAction = useCallback((a: AutoTurnAction) => {
+    if (a.type === 'draft') void autoDraft(a.turnId)
+    else void autoSpeak(a.pick)
+  }, [autoDraft, autoSpeak])
+
+  const autoSayIt = useCallback(() => {
+    const a = autoRef.current?.sayNow()
+    if (a) runAutoAction(a)
+    refreshAutoSnap()
+  }, [runAutoAction, refreshAutoSnap])
+
+  // Keep the controller in step with the saved preferences (bounds are enforced again inside the controller).
+  useEffect(() => {
+    autoRef.current?.setConfig({ enabled: prefs.autoTurn, silenceMs: prefs.autoSilenceMs, vetoMs: prefs.autoVetoMs, intent: prefs.autoIntent })
+    refreshAutoSnap()
+  }, [prefs.autoTurn, prefs.autoSilenceMs, prefs.autoVetoMs, prefs.autoIntent, refreshAutoSnap])
+
+  // The drive loop (5x/s) — only while listening with auto turn-taking switched on.
+  useEffect(() => {
+    if (!sessionActive || !prefs.autoTurn) return
+    const t = setInterval(() => {
+      const ctl = autoRef.current
+      if (!ctl) return
+      const now = Date.now()
+      const o = outputRef.current
+      const d = autoDraftRef.current
+      const fresh = d ? !trackerRef.current.staleness(d.set.turn, d.text) : true
+      const a = ctl.tick(now, {
+        composerText: composerValueRef.current,
+        engaged: engage.current.active(now),
+        outputBusy: o.kind === 'speaking' || o.kind === 'approved_pending_gap',
+        online: typeof navigator === 'undefined' ? true : navigator.onLine,
+        fresh,
+      })
+      if (a) runAutoAction(a)
+      refreshAutoSnap()
+    }, 200)
+    return () => clearInterval(t)
+  }, [sessionActive, prefs.autoTurn, runAutoAction, refreshAutoSnap])
+
+  /** Turning it ON is an explicit, informed decision; OFF is immediate and cancels anything pending. */
+  const toggleAuto = useCallback((on: boolean) => {
+    if (!on) {
+      autoCancel('turned_off')
+      update({ autoTurn: false })
+      return
+    }
+    if (!prefsRef.current.aiSuggestions) return setNotice('Auto turn-taking needs AI suggestions. Turn on “Show AI-drafted suggestions” in Settings first.')
+    if (!statusRef.current?.providers.groq) return setNotice('Auto turn-taking needs the suggestion service (Groq), which is not configured on this server.')
+    const ok = window.confirm('Turn on auto turn-taking?\n\nAfter your partner pauses, ReVOICE will draft a reply and speak it in your voice after a short countdown — unless you cancel it, type, or touch the suggestions.\n\nIt never replies to health, legal, money or consent topics and never agrees to things for you. You can turn it off at any time.')
+    if (!ok) return
+    update({ autoTurn: true })
+    humanActed()
+  }, [autoCancel, update])
 
   // ---------------------------------------------------------------- listening sessions
   const cleanupSession = useCallback(() => {
@@ -622,6 +816,9 @@ export function ReVoiceApp() {
     sttNoticeRef.current = false
     trackerRef.current.bumpGeneration() // invalidates all outstanding candidates/approvals
     gate.current.clear()
+    autoRef.current?.reset() // a pending automatic reply answers a conversation that no longer exists
+    autoDraftRef.current = null
+    lastDraftRef.current = null
     setSet(null)
     setPending(null)
     setRef.current = null
@@ -648,6 +845,7 @@ export function ReVoiceApp() {
 
   const listenerEvents = useMemo(() => ({
     onTurn: (t: TurnUpdate) => void onTurn(t),
+    onVoiceActivity: () => autoRef.current?.partnerActivity(Date.now()),
     onSpeechStarted: () => { marks.current.speechStarted = performance.now() },
     onStatus: (s: { state: string; detail?: string }) => {
       setListening(s.state)
@@ -703,6 +901,9 @@ export function ReVoiceApp() {
         setSessionTicket(r.ticket)
         trackerRef.current.setGeneration(r.generation)
         gate.current.clear()
+        autoRef.current?.reset()
+        autoDraftRef.current = null
+        lastDraftRef.current = null
         turnQueue.current.clear()
         suggAbort.current?.abort()
         setSet(null)
@@ -730,12 +931,13 @@ export function ReVoiceApp() {
     },
   }), [onTurn, speech, cleanupSession, endSession])
 
-  const startSession = async () => {
-    setNotice(null)
-    const st = statusRef.current
+  /** Listening via the LiveKit worker. 'failed' = could not start (the caller may fall back to direct listening). */
+  const startLivekitSession = async (): Promise<'started' | 'cancelled' | 'failed'> => {
+    const prefs = prefsRef.current
     const inputLanguages = prefs.inputLanguages.filter((c): c is (typeof INPUT_LANGUAGES)[number] => (INPUT_LANGUAGES as readonly string[]).includes(c))
+    const mode: Mode = effectiveMode(prefs.sessionMode, true)
+    const voice = voiceRef.current
     try {
-      if (st?.providers.livekit) {
         // D #35: never end another device's session silently. First try WITHOUT replace; if the server reports a live
         // session this device does not hold, ask, and only then repeat with replace.
         const startBody = { mode, voiceId: voice.id, outputLanguage: prefs.outputLanguage, inputLanguages, keyterms: prefs.keyterms, contextPrompt: prefs.contextPrompt }
@@ -747,7 +949,7 @@ export function ReVoiceApp() {
           const ok = window.confirm('You already have a listening session running (for example on another device). Starting a new one here will END that session. Continue?')
           if (!ok) {
             setNotice('Listening was not started: your other session is still running.')
-            return
+            return 'cancelled' as const
           }
           r = await api.startSession({ ...startBody, replace: true })
         }
@@ -788,16 +990,39 @@ export function ReVoiceApp() {
             const prev = lastState
             lastState = monitor.state
             setWorker(monitor.snapshot())
-            if (monitor.state === 'absent') setNotice('The voice worker has not joined. Your approved words will be spoken from this device. Listening needs the worker — the session ends automatically if it does not arrive.')
+            if (monitor.state === 'absent' && s.mode === 'tabletop' && statusRef.current?.providers.browserStt) {
+              // Guests must always be able to listen: a tabletop session does not need the worker, so switch to direct listening now.
+              void fallbackRef.current?.('the voice worker did not join')
+            } else if (monitor.state === 'absent') setNotice('The voice worker has not joined. Your approved words will be spoken from this device. Listening needs the worker — the session ends automatically if it does not arrive.')
             else if (monitor.state === 'lost') setNotice('The voice worker disconnected. Speech continues from this device; listening resumes if it reconnects.')
             else if (monitor.state === 'ready' && (prev === 'absent' || prev === 'lost' || prev === 'degraded')) setNotice('The voice worker is connected again. Listening and room speech are back.')
           }
           if (verdict === 'end') {
-            void endSession('error').then(() => setNotice('Listening ended: no voice worker was available to transcribe, so the room was closed and unused listening minutes were released. Typing, phrases and speech still work.'))
+            if (statusRef.current?.providers.browserStt) void fallbackRef.current?.('no voice worker was available')
+            else void endSession('error').then(() => setNotice('Listening ended: no voice worker was available to transcribe, so the room was closed and unused listening minutes were released. Typing, phrases and speech still work.'))
           }
         }, 1000)
         watchdog.current = setTimeout(() => void endSession('timeout'), r.maxSessionMinutes * 60_000)
-      } else if (st?.providers.browserStt) {
+      return 'started'
+    } catch (e) {
+      const code = e instanceof ApiError ? e.code : (e as Error).message
+      lastStartError.current = code
+      const failed = sessionRef.current
+      endedRef.current = failed
+      await listenerRef.current?.close().catch(() => undefined)
+      if (failed?.room) await api.endSession(failed.room, 'error', failed.ticket ?? getSessionTicket()).catch(() => undefined)
+      else if (failed?.sttSession) await api.endSession(failed.sttSession, 'error', failed.ticket ?? null).catch(() => undefined) // A7
+      cleanupSession()
+      setListening('off')
+      return 'failed'
+    }
+  }
+
+  /** Listening straight from this device's microphone (guest-friendly, tabletop only). */
+  const startDirectSession = async (): Promise<'started' | 'failed'> => {
+    const inputLanguages = prefsRef.current.inputLanguages.filter((c): c is (typeof INPUT_LANGUAGES)[number] => (INPUT_LANGUAGES as readonly string[]).includes(c))
+    const prefs = prefsRef.current
+    try {
         const conv = randomId(10)
         trackerRef.current = new TurnTracker(conv, 0)
         gate.current.clear()
@@ -820,12 +1045,10 @@ export function ReVoiceApp() {
         s.maxMinutes = maxMin
         setSession({ ...s })
         watchdog.current = setTimeout(() => void endSession('timeout'), maxMin * 60_000)
-      } else {
-        setNotice('Listening is not configured on this server. Typing, phrases and speech still work.')
-      }
+      return 'started'
     } catch (e) {
       const code = e instanceof ApiError ? e.code : (e as Error).message
-      setNotice(`Could not start listening (${code.replace(/_/g, ' ')}). Typing and phrases still work.`)
+      lastStartError.current = code
       const failed = sessionRef.current
       endedRef.current = failed
       await listenerRef.current?.close().catch(() => undefined)
@@ -833,6 +1056,50 @@ export function ReVoiceApp() {
       else if (failed?.sttSession) await api.endSession(failed.sttSession, 'error', failed.ticket ?? null).catch(() => undefined) // A7
       cleanupSession()
       setListening('off')
+      return 'failed'
+    }
+  }
+
+  const explainStartFailure = (code: string) => {
+    const c = code.replace(/_/g, ' ')
+    if (/NotAllowed|Permission|denied/i.test(code)) setNotice('The microphone is blocked. Allow microphone access for this site, then press Start listening again. Typing and phrases still work.')
+    else if (/NotFound|Devices/i.test(code)) setNotice('No microphone was found. Connect one, then press Start listening again. Typing and phrases still work.')
+    else setNotice(`Could not start listening (${c}). Typing and phrases still work.`)
+  }
+
+  /**
+   * Start listening. ANY visitor (no account) can do this: LiveKit when configured, otherwise — or when LiveKit cannot start —
+   * direct browser listening (default on whenever the voice service is configured).
+   */
+  const startSession = async () => {
+    setNotice(null)
+    const st = statusRef.current
+    if (st?.providers.livekit) {
+      const r = await startLivekitSession()
+      if (r === 'failed') {
+        if (st.providers.browserStt) {
+          setNotice(`Room listening is unavailable (${(lastStartError.current ?? 'error').replace(/_/g, ' ')}) — switched to direct listening on this device.`)
+          if ((await startDirectSession()) === 'failed') explainStartFailure(lastStartError.current ?? 'error')
+        } else explainStartFailure(lastStartError.current ?? 'error')
+      }
+    } else if (st?.providers.browserStt) {
+      if ((await startDirectSession()) === 'failed') explainStartFailure(lastStartError.current ?? 'error')
+    } else {
+      setNotice('Listening is not configured on this server. Typing, phrases and speech still work.')
+    }
+  }
+  const lastStartError = useRef<string | null>(null)
+
+  // Auto-fallback (task 1): a LiveKit session whose voice worker never arrives is replaced by direct listening, so a guest is never stuck.
+  fallbackRef.current = async (reason: string) => {
+    if (fallingBack.current) return
+    fallingBack.current = true
+    try {
+      await endSessionRef.current?.('error')
+      setNotice(`Switched to direct listening on this device (${reason}).`)
+      if ((await startDirectSession()) === 'failed') explainStartFailure(lastStartError.current ?? 'error')
+    } finally {
+      fallingBack.current = false
     }
   }
 
@@ -870,6 +1137,7 @@ export function ReVoiceApp() {
 
   // ---------------------------------------------------------------- suggestion handlers
   const useCandidate = (c: Candidate, s: CandidateSet) => {
+    humanActed()
     setComposer(c.text)
     speech?.edit(c.text)
     setComposerSource({ candidateSetId: s.id, candidateId: c.id, turn: s.turn, original: c.text, intent: c.intent, proof: s.proof, draftedFrom: setRef.current?.set.id === s.id ? setRef.current.draftedFrom : (trackerRef.current.get(s.turn.turnId)?.text ?? '') })
@@ -886,6 +1154,7 @@ export function ReVoiceApp() {
     engage.current.reset() // C #29
   }
   const regenerate = () => {
+    humanActed()
     const latest = trackerRef.current.latest()
     if (!latest) return setSuggError('No partner speech yet to draft from.')
     // C #28: a refused redraft is explained (the button is also disabled with a visible count when none are left).
@@ -1018,6 +1287,9 @@ export function ReVoiceApp() {
                 <Icon name={listening === 'paused' ? 'play' : 'pause'} size={14} /> {listening === 'paused' ? 'Resume listening' : 'Pause listening'}
               </button>
             )}
+            <button data-scan className="rv-chip" id="auto-turn-chip" aria-pressed={prefs.autoTurn} onClick={() => toggleAuto(!prefs.autoTurn)} title="Auto turn-taking: reply after your partner pauses (you can cancel every reply)">
+              <Icon name="clock" size={15} /> Auto turn-taking: {prefs.autoTurn ? 'on' : 'off'}
+            </button>
             <button data-scan className="rv-chip rv-chip-quote" disabled={speaking} onClick={holdMyTurn} title="Speaks your Hold My Turn phrase now">
               <Icon name="hand" size={15} /> <span className="truncate">“{prefs.holdTurnPhrase}”</span>
             </button>
@@ -1129,6 +1401,10 @@ export function ReVoiceApp() {
               </section>
             )}
 
+            {session && prefs.autoTurn && (
+              <TurnTakingCard snap={autoSnap} onCancel={() => autoCancel('user_cancel')} onSayIt={autoSayIt} onDismiss={() => { autoRef.current?.dismissNotice(); refreshAutoSnap() }} />
+            )}
+
             {prefs.aiSuggestions && session && (
               <Suggestions
                 set={set}
@@ -1176,13 +1452,13 @@ export function ReVoiceApp() {
                         <button data-scan className="rv-btn rv-btn-primary" onClick={startSession} disabled={!online || !listenAvailable}>
                           <Icon name="headphones" size={17} /> Start listening
                         </button>
-                        {status && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs LiveKit, or the trusted-demo direct mode).</p>}
+                        {status && !listenAvailable && <p className="rv-muted text-sm">Listening is not configured on this server (needs the voice service key, or LiveKit).</p>}
                       </>
                     ) : (
                       <>
                         <p className="flex flex-wrap items-center gap-2 text-sm">
                           <span className="rv-badge rv-badge-brand">State: {listening}</span>
-                          <span className="rv-badge">{session.kind === 'livekit' ? 'LiveKit worker' : 'direct (trusted demo)'}</span>
+                          <span className="rv-badge">{session.kind === 'livekit' ? 'LiveKit worker' : 'direct (this device)'}</span>
                           {session.kind === 'livekit' && worker && (
                             <span id="worker-presence" className={`rv-badge ${worker.route === 'room' ? 'rv-badge-brand' : ''}`} aria-live="polite" title={worker.reason ?? undefined}>
                               <span className={`rv-dot ${worker.state === 'ready' ? 'live' : ''}`} style={{ background: worker.state === 'ready' ? 'var(--ok)' : worker.state === 'waiting' || worker.state === 'connecting' ? 'var(--warn, #d97706)' : 'var(--danger, #dc2626)' }} aria-hidden="true" />
@@ -1234,6 +1510,7 @@ export function ReVoiceApp() {
               {tab === 'settings' && (
                 <div className="grid gap-4">
                   <SettingsPanel prefs={prefs} update={update} />
+                  <div className="rv-glass rv-enter p-4 sm:p-5"><TurnTakingSettings prefs={prefs} update={update} onToggle={toggleAuto} /></div>
                   <label className="rv-glass grid gap-2 p-4 text-sm font-semibold sm:p-5">
                     <span className="flex items-center gap-2"><Icon name="hand" size={16} /> “Hold My Turn” phrase (spoken exactly as written when you press it)</span>
                     <input className="rv-input font-normal" maxLength={120} value={prefs.holdTurnPhrase} onChange={(e) => update({ holdTurnPhrase: e.target.value || 'I have something to add.' })} />

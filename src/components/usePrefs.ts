@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { getPref, setPref } from '@/lib/client/db'
 import type { OutputLanguage } from '@/lib/contracts'
 import { DEFAULT_VOICE_ID } from '@/lib/voices'
+import { DEFAULT_AUTO_TURN, clampSilenceMs, clampVetoMs, isIntentPref, type IntentPref } from '@/lib/turn-taking'
 
 export interface Prefs {
   textScale: number
@@ -27,6 +28,14 @@ export interface Prefs {
   sessionMode: 'tabletop' | 'partner-link' | 'remote'
   /** Optional user-selected third intent for the Intent Compass. */
   preferredIntent: string
+  /**
+   * Auto turn-taking (OFF by default; a standing, revocable delegation with a visible veto window — see src/lib/turn-taking.ts).
+   * silence 1.5–3.0 s before the app drafts; veto window 2–10 s before the chosen reply is spoken.
+   */
+  autoTurn: boolean
+  autoSilenceMs: number
+  autoVetoMs: number
+  autoIntent: IntentPref
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -48,6 +57,16 @@ export const DEFAULT_PREFS: Prefs = {
   holdTurnPhrase: 'I have something to add.',
   sessionMode: 'tabletop',
   preferredIntent: '',
+  autoTurn: DEFAULT_AUTO_TURN.enabled,
+  autoSilenceMs: DEFAULT_AUTO_TURN.silenceMs,
+  autoVetoMs: DEFAULT_AUTO_TURN.vetoMs,
+  autoIntent: DEFAULT_AUTO_TURN.intent,
+}
+
+/** Stored prefs from older versions (or hand-edited) must never switch auto turn-taking on or leave a bound out of range. */
+export function sanitizePrefs(p: Partial<Prefs>): Prefs {
+  const m = { ...DEFAULT_PREFS, ...p }
+  return { ...m, autoTurn: p.autoTurn === true, autoSilenceMs: clampSilenceMs(m.autoSilenceMs), autoVetoMs: clampVetoMs(m.autoVetoMs), autoIntent: isIntentPref(m.autoIntent) ? m.autoIntent : 'auto' }
 }
 
 export type SyncState = { state: 'local' | 'synced' | 'syncing' | 'error'; message?: string; at?: number }
@@ -63,7 +82,7 @@ export function usePrefs() {
 
   useEffect(() => {
     getPref<Partial<Prefs>>('prefs', {}).then((p) => {
-      setPrefs({ ...DEFAULT_PREFS, ...p })
+      setPrefs(sanitizePrefs(p))
       setLoaded(true)
     })
   }, [])
@@ -79,7 +98,7 @@ export function usePrefs() {
 
   const update = useCallback((patch: Partial<Prefs>) => {
     setPrefs((p) => {
-      const next = { ...p, ...patch }
+      const next = sanitizePrefs({ ...p, ...patch })
       void setPref('prefs', next)
       return next
     })

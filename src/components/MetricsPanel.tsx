@@ -33,6 +33,7 @@ export function MetricsPanel({ status }: { status: StatusResponse | null }) {
         <dt className="rv-muted">Stops</dt><dd>{c.stops}</dd>
         <dt className="rv-muted">Delivery uncertain</dt><dd>{c.uncertain}</dd>
         <dt className="rv-muted">Worker fallbacks (spoken from device)</dt><dd>{c.routeFallbacks}</dd>
+        <dt className="rv-muted">Auto turn-taking: spoken / cancelled / blocked</dt><dd>{c.autoSpoken} / {c.autoCancelled} / {c.autoBlocked}</dd>
         <dt className="rv-muted">Unapproved speech</dt><dd>{c.unapprovedSpeech}</dd>
         <dt className="rv-muted">Est. cost / approved turn (today)</dt><dd>{c.approvedTurns ? `$${(usd / c.approvedTurns).toFixed(4)}` : '—'}</dd>
       </dl>

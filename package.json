@@ -2,7 +2,7 @@
   "name": "revoice",
   "version": "0.1.0",
   "private": true,
-  "description": "ReVOICE \u2014 human-gated conversational voice prosthesis (assistive communication, not an autonomous agent)",
+  "description": "ReVOICE — human-gated conversational voice prosthesis (assistive communication, not an autonomous agent)",
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
@@ -38,5 +38,8 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=20.19.0 <27"
   }
 }

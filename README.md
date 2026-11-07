@@ -4,10 +4,40 @@
 
 ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomous voice agent. A detected pause is not consent, and a plausible reply is not what the user means.
 
-> Stack: Next.js (App Router) · React · TypeScript · Tailwind · Zod · Dexie/IndexedDB · Supabase (auth, minimal DB, RLS) · LiveKit Cloud Build (media and Python worker) · AssemblyAI BYOK (STT `universal-3-6-pro`, TTS `assemblyai-tts-1`) · Groq (`openai/gpt-oss-20b`).
+> Stack: Next.js (App Router) · React · TypeScript · Tailwind · Zod · Dexie/IndexedDB · Supabase (optional server-side store only — no sign-in) · LiveKit Cloud Build (media and Python worker) · AssemblyAI BYOK (STT `universal-3-6-pro`, TTS `assemblyai-tts-1`) · Groq (`openai/gpt-oss-20b`).
 > **Never Cloudflare, never Hono.** Frontend target: Vercel Hobby.
 
 ---
+
+## 0h. Auto turn-taking + guest-launchable listening (this release)
+
+**Listening is launchable by any visitor.** Browser-direct listening (mic → short-lived AssemblyAI token → streaming STT) is now **ON by default** whenever `ASSEMBLYAI_API_KEY` is set (`REVOICE_ALLOW_BROWSER_STT=false` turns it off). When LiveKit is configured it is tried first; if it cannot start, or its voice worker never joins a tabletop session, the app **automatically falls back to direct listening** and says so. Minutes are still reserved durably, capped and settled per device (see the A-series spend controls). The dead auth leftovers (`/api/account/*`, `AuthControls`, `client/supabase.ts`, `auth-providers.ts`, `auth-note.ts`, `prefs-sync.ts`, `NEXT_PUBLIC_SUPABASE_*`) are deleted; there is no sign-in anywhere.
+
+**Auto turn-taking (opt-in, OFF by default).** A standing, *revocable* delegation, not an autonomous agent:
+
+```
+partner stops talking → SilenceTurnDetector (1.5–3.0 s, default 2 s) → Groq draft (3 intent-distinct candidates)
+  → pickCandidate (safest suitable one) → VETO COUNTDOWN (2–10 s, default 4 s: Cancel / Say it now)
+  → server-signed approval of the EXACT text (same SpeechController path as a typed message) → TTS
+```
+
+| Piece | File |
+|---|---|
+| Pure state machine: `SilenceTurnDetector`, `pickCandidate`, `liveGuard`, `AutoTurnController` | `src/lib/turn-taking.ts` |
+| Energy VAD (adaptive noise floor, hysteresis, onset frames, hangover) + throttled `VoiceActivityEmitter` | `src/lib/energy-vad.ts` |
+| `onVoiceActivity` wired into `DirectSttListener` (VAD on the captured PCM, never while our own voice plays) and `LiveKitListener` (worker speech-started) | `src/lib/client/listening.ts` |
+| Wiring: silence → draft (reuses the draft already made for the final transcript) → countdown → `speech.request()` | `src/components/ReVoiceApp.tsx` |
+| UI: settings section, listening card (silence meter, veto countdown, Cancel / Say it now, blocked/cancelled notices), quick chip | `src/components/TurnTakingControls.tsx` |
+| Prefs: `autoTurn`, `autoSilenceMs`, `autoVetoMs`, `autoIntent` (sanitised on load: stored data can never switch it on or leave a bound) | `src/components/usePrefs.ts` |
+
+Safety rules enforced (all unit-tested, `tests/turn-taking*.test.ts`, `tests/energy-vad.test.ts`):
+- **Nothing is spoken before the veto window has fully elapsed**, and the words are never rewritten: the spoken text must equal the drafted candidate, which goes through a server-signed approval including the candidate proof and the Conversation Brake.
+- **Cancelled by:** the Cancel button, Stop / Esc, typing in the message box, touching a suggestion card, the partner speaking again or the transcript changing, going offline, a stale set, turning the setting off, a new session or a reconnect. A cancelled draft is placed in the message box for you to edit.
+- **Never auto-replies** to health, legal, money, consent or emergency topics (partner's words *or* the draft), to any draft with a non-`none` risk category, to over-long drafts, or with an affirmative commitment ("yes / sure / I'll be there…"), unless you chose the *decline* style.
+- **Dead-man switch:** after 3 automatic replies in a row with no input from you it stops and tells you; any deliberate action (typing, a button, Say it now, Stop) restarts the count.
+- **Deaf to itself:** while ReVOICE speaks, and for 1.5 s after, nothing the mic hears counts; the VAD also ignores gated frames.
+- Turning it on needs an explicit confirmation and AI suggestions (Groq); turning it off is immediate.
+- Honest limits: the VAD cannot tell your partner from music or a TV; the silence clock is a heuristic, so the veto window is the real safeguard. Choose longer windows for slower access methods.
 
 ## 0g. No sign-in (this release)
 
@@ -15,7 +45,7 @@ ReVOICE now has **no sign-in of any kind**: no accounts, passwords, OAuth, e-mai
 
 Removed in this release: `AuthControls`, `client/supabase.ts`, `auth-providers.ts`, `auth-note.ts`, `prefs-sync.ts`, `/api/account/*` (replaced by `/api/data/export` and `/api/data/delete`), all `NEXT_PUBLIC_SUPABASE_*` variables and the Supabase origins in the CSP. Phrase boards, message bank and preferences live in IndexedDB on the device. Optional operator views use `REVOICE_OPERATOR_TOKEN`; registering a cloned voice can be gated with `REVOICE_CLONE_PASSCODE`.
 
-Verification: `tsc --noEmit` clean, `vitest` 332/332, `next build` + secret scan pass. `vercel.json` is included and verified for Vercel (Next.js framework preset, `npm ci`, `npm run build`).
+Verification: `tsc --noEmit` clean, `vitest` 400/400, `next build` + secret scan pass. `vercel.json` is included and verified for Vercel (Next.js framework preset, `npm ci`, `npm run build`).
 
 ## 0. Critical bug fixes (B1–B4)
 
@@ -181,7 +211,7 @@ Regression tests: `tests/bugfixes-d32-d46.test.ts` (69 tests) and `worker/tests/
 | `POST /api/suggest` | One Groq call → 3 candidates bound to turn, revision, voice, language and expiry |
 | `POST /api/livekit/session` · `POST /api/livekit/end` | Start/end the single active conversation, mint the owner token and partner invite, dispatch the worker |
 | `POST /api/livekit/join` | Partner exchanges a signed invite (with consent) for a microphone-only token |
-| `POST /api/stt-token` | Temporary AssemblyAI token; **only** if `REVOICE_ALLOW_BROWSER_STT=true` (trusted private demo) |
+| `POST /api/stt-token` | Temporary AssemblyAI token for browser-direct listening; **on by default**, disable with `REVOICE_ALLOW_BROWSER_STT=false` |
 | `POST /api/voices/renew` | Affirmative consent renewal for a cloned voice |
 | `POST /api/phone/pair` | Owner creates a 6-digit pair code (needs an active session; phone must be enabled) |
 | `POST /api/phone/bind` · `POST /api/phone/usage` | Worker only (HMAC header): bind a caller to the owner room; settle minutes used |
@@ -376,7 +406,7 @@ There is **no sign-in anywhere in ReVOICE**. Supabase is only a server-side data
 3. In **Project Settings → Environment Variables**, add every variable from `.env.example` with real values, plus `REVOICE_APPROVAL_SECRET` (recommended) and optionally `REVOICE_OPERATOR_TOKEN` (unlocks spend reconciliation when pasted in Settings → Operator) and `CRON_SECRET` (Vercel Cron for `/api/cron/purge`). No variable may have the `NEXT_PUBLIC_` prefix; the secret scan in `postbuild` fails the build if a secret reaches the browser.
 4. Deploy, then put the Vercel URL into:
    - the worker's `REVOICE_APP_URL` secret
-5. Keep `REVOICE_ALLOW_BROWSER_STT=false` in production. It's only for a trusted private demo.
+5. `REVOICE_ALLOW_BROWSER_STT` defaults to on so guests can listen with only `ASSEMBLYAI_API_KEY`. Each token mint reserves bounded minutes (per device, per IP and project-wide); set it to `false` if you want LiveKit-only listening.
 
 ### Step 8 — First live check (budget at most $2)
 1. Open the site (no sign-in), type a sentence and press **Speak**. You should hear the AssemblyAI voice.

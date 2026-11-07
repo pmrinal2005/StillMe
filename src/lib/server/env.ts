@@ -55,7 +55,11 @@ export const env = {
   /** Server-side durable store only (the browser never talks to Supabase). `SUPABASE_URL` preferred; the legacy name still works. */
   supabaseUrl: () => opt('SUPABASE_URL'),
   supabaseService: () => opt('SUPABASE_SERVICE_ROLE_KEY'),
-  allowBrowserStt: () => opt('REVOICE_ALLOW_BROWSER_STT') === 'true',
+  /**
+   * Browser-direct listening (short-lived AssemblyAI token, minutes reserved durably). DEFAULT ON so every guest can start
+   * listening with only ASSEMBLYAI_API_KEY configured; set REVOICE_ALLOW_BROWSER_STT=false to turn it off.
+   */
+  allowBrowserStt: () => !['false', '0', 'no', 'off'].includes((opt('REVOICE_ALLOW_BROWSER_STT') ?? '').toLowerCase()),
   /** Included US number only — the owner enables this ONLY if activation requires no new spending. */
   phoneInboundEnabled: () => opt('REVOICE_PHONE_INBOUND_ENABLED') === 'true',
   phoneNumberDisplay: () => opt('REVOICE_PHONE_NUMBER_DISPLAY'),

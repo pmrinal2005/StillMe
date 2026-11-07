@@ -696,3 +696,24 @@ details > summary { cursor: pointer; list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
 code { font-size: .9em; background: rgba(139, 63, 214, .08); padding: .05rem .35rem; border-radius: .35rem; }
 }
+
+/* ---------------------------------------------------------------- auto turn-taking meters */
+.rv-meter {
+  height: 0.65rem;
+  width: 100%;
+  border-radius: 999px;
+  background: rgba(24, 16, 40, 0.1);
+  overflow: hidden;
+  border: 1px solid rgba(24, 16, 40, 0.12);
+}
+.rv-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--pink-deep), var(--violet));
+  transition: width 0.18s linear;
+}
+.rv-meter-veto > span { background: linear-gradient(90deg, var(--danger), var(--pink-deep)); }
+html[data-motion="reduced"] .rv-meter > span { transition: none; }
+html[data-contrast="high"] .rv-meter { background: #000; border-color: #ffd400; }
+html[data-contrast="high"] .rv-meter > span { background: #ffd400; }
