@@ -9,6 +9,23 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0m. Final fix pass (this release)
+
+Re-cloned `pmrinal2005/StillMe`, re-ran every check, and fixed the three tests that were still failing.
+
+| Item | Finding | Fix |
+|---|---|---|
+| `.env.example` | Still listed `NEXT_PUBLIC_SUPABASE_*`, defaulted `REVOICE_ALLOW_BROWSER_STT=false` and had no `CRON_SECRET` (3 failing tests) | Rewritten and grouped by provider; no public Supabase vars; browser STT `true`; `CRON_SECRET=` added; optional operator/clone/phone vars documented |
+| `env.example`, `vercelignore.txt`, `tsconfig.tsbuildinfo` | Stale duplicates / build artefacts | Removed |
+| `vercel.json` | Verified: Next.js preset, `npm ci`, `npm run build`, 60 s API duration, no-store API, daily purge cron, no Cloudflare/Hono | Unchanged |
+| Landing first | `/` is the landing page, every CTA opens `/dashboard`, the dashboard logo links back | Verified in a browser (mobile + desktop) |
+
+Checks: `tsc --noEmit` clean, `vitest` 25 files / **480 of 480** pass, `next build` + secret scan pass (59 browser files, no leaks). Responsive check: no horizontal overflow on `/`, `/dashboard` and `/join` at 320, 390, 768, 1280 and 1920 px. Landing to dashboard click-through: no page errors.
+
+**Deploy to Vercel:** import the repo (framework auto-detects Next.js from `vercel.json`), add the variables from `.env.example` under Settings -> Environment Variables (at minimum `ASSEMBLYAI_API_KEY`, `GROQ_API_KEY`, `CRON_SECRET`), then deploy.
+
+---
+
 ## 0l. Verification pass on the cloned repo (this release)
 
 Cloned `pmrinal2005/StillMe`, audited it against the TODO list, and re-ran every check. TODO 1-3 and the owner grace work were already in the code; this pass found and fixed the remaining failures.
