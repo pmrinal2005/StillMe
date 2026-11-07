@@ -26,8 +26,12 @@ describe('auto turn-taking preferences', () => {
 describe('auto turn-taking never bypasses the approval path', () => {
   it('the ONLY speech call in the auto path is SpeechController.request (server-signed approval of the exact text)', () => {
     const block = app.slice(app.indexOf('const autoSpeak = useCallback'), app.indexOf('const runAutoAction'))
-    expect(block).toMatch(/speech\.request\(cand\.text, \{ source, partnerSpeaking: false, speakNow: true, auto: true \}\)/)
+    expect(block).toMatch(/speech\.request\(cand\.text, \{ source, partnerSpeaking: false, speakNow: true, auto: !viaSayIt \}\)/)
     expect(block).not.toMatch(/api\.speakStream|speakDevice|playerRef|new SpeechSynthesisUtterance|api\.approve/)
+  })
+  it('"Say it now" is a deliberate human tap (ordinary manual approval, no auto flag); only the timed path carries `auto` for the server backstop', () => {
+    expect(app).toMatch(/auto: auto \? \{ mode: 'turn_taking' as const/)
+    expect(app).toMatch(/autoSpeak\(a\.pick, a\.viaSayIt\)/)
   })
   it('the words spoken are the picked candidate text verified against the set that was drafted (no rewriting)', () => {
     const block = app.slice(app.indexOf('const autoSpeak = useCallback'), app.indexOf('const runAutoAction'))

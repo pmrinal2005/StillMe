@@ -50,7 +50,7 @@ export interface SpeakOptions {
   partnerSpeaking: boolean
   /** Phrase-board phrase the owner marked as cacheable (library voices only). */
   cacheable?: boolean
-  /** Spoken by auto turn-taking after the owner's veto window (metrics only — the approval path is identical). */
+  /** Spoken by auto turn-taking after the owner's veto window. The approval request carries `auto` so the SERVER re-checks the draft. */
   auto?: boolean
 }
 
@@ -60,7 +60,7 @@ export interface SpeechDeps {
    * Server-signed approval for the exact text. `route` decides the binding: 'room' approvals are bound
    * to the LiveKit room (verified by the worker); 'direct' approvals carry roomName=null (verified by /api/speak).
    */
-  approve(text: string, textHash: string, source: SpeakSource | undefined, route: SpeechRoute): Promise<Approval>
+  approve(text: string, textHash: string, source: SpeakSource | undefined, route: SpeechRoute, auto?: boolean): Promise<Approval>
   directStream(approval: Approval, text: string, signal: AbortSignal): Promise<{ body: ReadableStream<Uint8Array>; sampleRate: number }>
   /** Present when a LiveKit worker is connected: the worker synthesizes into the room. */
   room?: { speak(approval: Approval, text: string): Promise<void>; stop(attemptId?: string): Promise<void> } | null
@@ -159,7 +159,7 @@ export class SpeechController {
     let approval: Approval
     const route = this.currentRoute() // B5: the approval is bound to the route chosen right now
     try {
-      approval = await this.d.approve(frozen, hash, opts.source, route)
+      approval = await this.d.approve(frozen, hash, opts.source, route, opts.auto === true)
     } catch (e) {
       this.emit({ type: 'failed', message: (e as Error).message || 'approval_rejected' })
       return 'rejected'
@@ -261,7 +261,7 @@ export class SpeechController {
   private async reapproveDirect(text: string, opts: SpeakOptions): Promise<Approval | null> {
     try {
       const hash = await this.d.sha256(text)
-      const a = await this.d.approve(text, hash, opts.source, 'direct')
+      const a = await this.d.approve(text, hash, opts.source, 'direct', opts.auto === true)
       if (a.textHash !== hash || a.roomName) {
         this.emit({ type: 'failed', message: 'altered_text' })
         return null

@@ -102,6 +102,18 @@ export const ApproveRequest = z.object({
   generation: z.number().int().min(0),
   voiceId: z.string().min(1).max(128),
   outputLanguage: OutputLanguage,
+  /**
+   * Present only when auto turn-taking (the owner's standing, revocable opt-in) is about to speak an UNEDITED AI draft after the
+   * veto window. The server re-checks the draft's recorded intent/risk/content and the partner turn it answers before signing.
+   */
+  auto: z
+    .object({
+      mode: z.literal('turn_taking'),
+      silenceMs: z.number().int(),
+      vetoMs: z.number().int(),
+      prefer: z.enum(['auto', 'continue', 'clarify', 'decline']).optional(),
+    })
+    .optional(),
   /** If approving an AI candidate, the candidate set + turn it was bound to. Absent for user-typed text. */
   source: z
     .object({

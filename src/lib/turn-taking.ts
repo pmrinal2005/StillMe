@@ -85,6 +85,34 @@ export function partnerAsked(text: string): boolean {
   return QUESTION_START.test(last.trim())
 }
 
+// ------------------------------------------------------------------------------------------------ server/client shared policy
+/** Digits, currency, links and e-mail addresses: specifics (dates, prices, numbers) the owner must choose themself. */
+const SPECIFICS = /\d|https?:|www\.|\S+@\S+\.\S+/i
+
+/** Policy shared by the browser (what it proposes) and the server backstop (what it will sign for an `auto` approval). */
+export const TURN_TAKING = {
+  silenceMs: { min: SILENCE_MIN_MS, max: SILENCE_MAX_MS },
+  vetoMs: { min: VETO_MIN_MS, max: VETO_MAX_MS },
+  /** Neutral continuation or clarifying question. `decline` is allowed only when the owner chose the decline style. */
+  allowedIntents: ['continue', 'clarify'] as readonly Intent[],
+  /** A partner turn needs at least this many words to deserve an automatic reply (mirrors isSubstantiveTurn). */
+  minPartnerWords: 3,
+  maxChars: MAX_AUTO_CHARS,
+  /** Server-side rate cap for automatic replies per device. */
+  rate: { limit: 10, windowMs: 5 * 60_000 },
+} as const
+
+/** The partner's words are about health, legal, money, consent or another matter a machine must not answer for the owner. */
+export const isSensitivePartnerText = (s: string): boolean => HIGH_STAKES.test(s)
+
+/** Server-side content check for a candidate that is about to be spoken automatically (stricter than the picker: no digits/links). */
+export function isAutoSpeakable(c: Pick<Candidate, 'text' | 'risk'>): boolean {
+  const t = c.text.trim()
+  if (!t || t.length > MAX_AUTO_CHARS) return false
+  if (c.risk !== 'none') return false
+  return !HIGH_STAKES.test(t) && !COMMITMENT.test(t) && !SPECIFICS.test(t)
+}
+
 // ------------------------------------------------------------------------------------------------ SilenceTurnDetector
 export interface DetectorTurn { turnId: number; text: string; endOfTurn: boolean }
 export type DetectorEvent =
@@ -221,6 +249,7 @@ export function candidateProblem(c: Candidate, pref: IntentPref): { reason: stri
   const text = c.text.trim()
   if (!text) return { reason: 'empty', message: 'The draft was empty.' }
   if (text.length > MAX_AUTO_CHARS) return { reason: 'too_long', message: 'The draft was too long to speak automatically.' }
+  if (SPECIFICS.test(text)) return { reason: 'specifics', message: 'That draft contains a number, date or link, so I did not speak it.' }
   if (isHighStakesText(text)) return { reason: 'high_stakes_candidate', message: 'That draft mentions a high-stakes subject, so I did not speak it.' }
   // Committing words are blocked for every intent except an explicit "decline" preference (declining is the owner's own choice).
   if (pref !== 'decline' && isCommitmentText(text)) return { reason: 'commitment', message: 'That draft agrees to something on your behalf, so I did not speak it.' }

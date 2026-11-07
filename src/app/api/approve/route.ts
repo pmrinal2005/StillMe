@@ -6,6 +6,9 @@ import { resolveOwnedSession, ticketFrom } from '@/lib/server/session'
 import { ApproveRequest, type TurnRef } from '@/lib/contracts'
 import { ApprovalError, issueApproval } from '@/lib/approval'
 import { evaluateCandidateSource } from '@/lib/candidate-proof'
+import { evaluateAutoApproval } from '@/lib/auto-approval'
+import { TURN_TAKING } from '@/lib/turn-taking'
+import { allow } from '@/lib/server/rate-limit'
 import { authorizeVoice, VoiceRegistryError, voiceStoreFor } from '@/lib/server/voice-registry'
 import { withJsonErrors } from '@/lib/server/route'
 import { reserveTtsSpend } from '@/lib/server/spend'
@@ -60,6 +63,19 @@ async function handlePOST(req: Request) {
     })
     if (!verdict.ok) return json({ error: verdict.error, reason: verdict.reason, message: verdict.message }, verdict.status)
     currentTurn = verdict.turn
+  }
+  // Auto turn-taking backstop: an `auto` approval may only carry an unedited, non-committal, risk-"none" AI draft that answers
+  // an ordinary partner turn (all re-derived from the signed proof, never from what the browser says). Anything else is refused.
+  if (body.auto) {
+    const av = await evaluateAutoApproval({
+      secret: env.approvalSecret(),
+      owner: id.userId,
+      text: body.text,
+      auto: body.auto,
+      source: body.source,
+      rateAllow: () => allow(`auto:${id.userId}`, TURN_TAKING.rate.limit, TURN_TAKING.rate.windowMs),
+    })
+    if (!av.ok) return json({ error: av.error, reason: av.reason, message: av.message }, av.status)
   }
   let approval
   try {

@@ -9,6 +9,40 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0i. Final verification pass: server backstop for auto turn-taking, repo cleanup, live checks
+
+What was wrong when this pass started (the previous commit message claimed more than the tree contained):
+
+| Problem found | Fix |
+|---|---|
+| The "deleted" auth files were still in the repo (`AuthControls.tsx`, `client/supabase.ts`, `auth-providers.ts`, `auth-note.ts`, `prefs-sync.ts`, `/api/account/*`), and `env.example` duplicated `.env.example` | Removed. `.env.example` has no `NEXT_PUBLIC_SUPABASE_*` and defaults `REVOICE_ALLOW_BROWSER_STT=true` |
+| Two competing turn-taking designs: an unwired `client/auto-turn.ts` + `vad.ts` (about 30 failing tests, 40+ type errors) next to the wired `turn-taking.ts` + `energy-vad.ts` | Kept the wired design, deleted the dead one and its tests |
+| `auto-approval.ts` (the **server** backstop) imported symbols that did not exist and was never called by `/api/approve` | Wired end to end (below) |
+
+**Server backstop.** The browser decides *when* to propose an automatic reply; it no longer is the only thing deciding *what* may be spoken automatically.
+
+- `/api/suggest` now records each candidate's `intent` and `risk` **inside the HMAC-signed candidate proof** (`meta`).
+- The timed auto path sends `auto: { mode: 'turn_taking', silenceMs, vetoMs, prefer }` with `/api/approve`. `src/lib/auto-approval.ts` then re-derives everything from the signed proof: unedited AI draft, intent is `continue`/`clarify` (`decline` only if the owner chose the decline style), risk is `none`, no digits/links/commitments/high-stakes words, the partner turn it answers is not sensitive and has at least 3 words, the declared pause and veto windows are in range, and the device is under 10 automatic replies per 5 minutes. Anything else is refused with 403 `auto_not_allowed` (or 429 `auto_rate_limited`). Old proofs without `meta` fail closed.
+- "Say it now" is a deliberate human tap, so it is an ordinary manual approval with no `auto` flag.
+- The browser picker now also skips drafts containing digits or links, so it never proposes text the server would refuse.
+- Shared policy lives in `TURN_TAKING`, `isAutoSpeakable` and `isSensitivePartnerText` (`src/lib/turn-taking.ts`).
+
+**Verification (this pass).**
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` (vitest) | 22 files, 414 tests pass |
+| `cd worker && pytest -q` | 117 pass. The two earlier collection errors were only missing `livekit` / `livekit-plugins-assemblyai`; install `worker/requirements-dev.txt` into a venv first |
+| `npm run build` (+ `postbuild` secret scan) | pass, no leaks in 41 browser files |
+| AssemblyAI key: REST `/v2/transcript` and streaming token mint | 200 |
+| `npm run smoke:live` (providers only) | 28/28: all 24 library voices synthesize, Hindi rejected 422, `universal-3-6-pro` STT round trip |
+| `npm run smoke:live` against the production build served locally | 41/41, including speak/replay/altered-text/unregistered-clone/device-key checks |
+| `npm run smoke:worker` | all pass (plugin TTS to plugin STT to TurnAdapter, revisions strictly increase, one authoritative final) |
+| Live `/api/approve` with `auto` and no AI draft | refused `needs_ai_draft`; a forged proof is refused `invalid_proof`; a typed approval still succeeds |
+
+Groq and LiveKit were not configured in this sandbox, so Groq drafting and LiveKit rooms were not exercised live. Their logic is covered by the mocked unit tests.
+
 ## 0h. Auto turn-taking + guest-launchable listening (this release)
 
 **Listening is launchable by any visitor.** Browser-direct listening (mic → short-lived AssemblyAI token → streaming STT) is now **ON by default** whenever `ASSEMBLYAI_API_KEY` is set (`REVOICE_ALLOW_BROWSER_STT=false` turns it off). When LiveKit is configured it is tried first; if it cannot start, or its voice worker never joins a tabletop session, the app **automatically falls back to direct listening** and says so. Minutes are still reserved durably, capped and settled per device (see the A-series spend controls). The dead auth leftovers (`/api/account/*`, `AuthControls`, `client/supabase.ts`, `auth-providers.ts`, `auth-note.ts`, `prefs-sync.ts`, `NEXT_PUBLIC_SUPABASE_*`) are deleted; there is no sign-in anywhere.
@@ -221,7 +255,7 @@ Regression tests: `tests/bugfixes-d32-d46.test.ts` (69 tests) and `worker/tests/
 ## 3. Architecture
 
 ```
-Control plane:  Browser ──► Next.js routes ──► Supabase (auth/prefs/ledgers) · LiveKit server API
+Control plane:  Browser ──► Next.js routes ──► Supabase (optional server-side ledgers/voice registry; no sign-in) · LiveKit server API
 Realtime plane: Partner mic ─► LiveKit room ─► Python worker ─► AssemblyAI STT (u3-6-pro)
                                                    │ transcript (data channel) ─► owner UI ─► /api/suggest (Groq)
                 owner approves ─► /api/approve ─► signed approval ─► worker re-verifies ─► AssemblyAI TTS ─► room audio
@@ -238,7 +272,7 @@ Rules enforced in code and tests:
 - Provider keys stay server-side. Nothing secret uses the `NEXT_PUBLIC_` prefix, and `scripts/scan-secrets.mjs` fails the build if a secret appears in browser assets.
 
 ## 4. Data
-- **Durable (Supabase, RLS on every user table):** profiles, accessibility prefs, style cards, voice profiles, biometric consents, phrase boards and phrases, conversation sessions and members, budget reservations, usage events, provider reconciliations, approval uses, content-free audit events, phone pair codes (hashed), phone calls. See `supabase/migrations/0001_init.sql` and `0002_phone_reconcile.sql`.
+- **Durable (optional Supabase, written only by the server with the service role; device-scoped, no accounts):** profiles, accessibility prefs, style cards, voice profiles, biometric consents, phrase boards and phrases, conversation sessions and members, budget reservations, usage events, provider reconciliations, approval uses, content-free audit events, phone pair codes (hashed), phone calls. See `supabase/migrations/0001_init.sql` and `0002_phone_reconcile.sql`.
 - **Device (IndexedDB):** phrase boards, prefs, cloned-voice registry and consent events, authorized phrase cache (library voices only), message bank recordings, feedback ("sounds like me" / "not my meaning"), metrics.
 - **Memory only:** live transcripts, candidate sets, turn revisions.
 - **Never stored:** audio recordings by the app, full transcripts, raw-content logs, clone samples.
@@ -397,7 +431,7 @@ There is **no sign-in anywhere in ReVOICE**. Supabase is only a server-side data
 ### Step 6 — Run locally
 1. Run `npm run build`. The build fails if any secret leaks into browser files.
 2. Start it with `npm start` (or `pm2 start ecosystem.config.cjs`), then open http://localhost:3000.
-3. Run the tests: `npm test` (332 tests) and `cd worker && pytest -q` (117 tests; install `worker/requirements-dev.txt` first).
+3. Run the tests: `npm test` (414 tests) and `cd worker && pytest -q` (117 tests; install `worker/requirements-dev.txt` first).
 4. Microphone and audio need HTTPS or `localhost`. Test on a phone through your deployed Vercel URL.
 
 ### Step 7 — Deploy the frontend to Vercel Hobby
@@ -419,14 +453,14 @@ There is **no sign-in anywhere in ReVOICE**. Supabase is only a server-side data
 ## Live checks (opt-in, budget-capped; key from the environment ONLY)
 
 ```bash
-ASSEMBLYAI_API_KEY=... REVOICE_BASE_URL=https://stillmee.vercel.app npm run smoke:live   # provider + deployed-app checks (37)
+ASSEMBLYAI_API_KEY=... REVOICE_BASE_URL=https://stillmee.vercel.app npm run smoke:live   # provider + deployed-app checks (41)
 ASSEMBLYAI_API_KEY=... npm run smoke:worker   # worker plugin TTS -> STT (universal-3-6-pro) -> TurnAdapter on real provider events
 ```
-Last run: smoke:live 37/37, smoke:worker 5/5 (revisions supersede, single final, authoritative transcript).
+Last run: smoke:live 41/41 (28/28 provider-only), smoke:worker 5/5 (revisions supersede, single final, authoritative transcript).
 
 ## E48: phrase-board two-way sync
 
-Phrase boards stay on-device (IndexedDB, works offline) and, when signed in with a real account, sync with Supabase (`phrase_boards`, `phrases` from migration 0005).
+Phrase boards stay on-device (IndexedDB, works offline). When the optional server-side store is configured they also sync per device (device cookie, no sign-in) with Supabase (`phrase_boards`, `phrases` from migration 0005).
 
 - Each board/phrase has `updatedAt` and a soft-delete `deletedAt`, so deletions propagate. Last-writer-wins per row; a tie goes to the cloud copy.
 - Built-in boards use deterministic ids and `updatedAt: 0`. A fresh device never uploads its defaults, so it can't overwrite cloud data, and two devices never duplicate the defaults.

@@ -241,7 +241,7 @@ export function ReVoiceApp() {
   if (!speechRef.current && typeof window !== 'undefined') {
     speechRef.current = new SpeechController({
       sha256: sha256Hex,
-      approve: async (text, textHash, source, route) => {
+      approve: async (text, textHash, source, route, auto) => {
         const s = sessionRef.current
         const p = prefsRef.current
         const v = voiceRef.current
@@ -256,6 +256,7 @@ export function ReVoiceApp() {
             voiceId: v.id,
             outputLanguage: p.outputLanguage,
             source,
+            auto: auto ? { mode: 'turn_taking' as const, silenceMs: p.autoSilenceMs, vetoMs: p.autoVetoMs, prefer: p.autoIntent } : undefined,
           },
           v.clone,
         )
@@ -707,7 +708,7 @@ export function ReVoiceApp() {
    * request as a typed message — a server-signed approval of the exact text (candidate proof + Conversation Brake verified on the
    * server) — and only then does TTS run. Failure leaves nothing spoken and a visible notice.
    */
-  const autoSpeak = useCallback(async (pick: AutoPick) => {
+  const autoSpeak = useCallback(async (pick: AutoPick, viaSayIt = false) => {
     const ctl = autoRef.current
     if (!ctl || !speech) return
     const done = (r: string) => {
@@ -732,13 +733,13 @@ export function ReVoiceApp() {
     }
     autoDraftRef.current = null
     setNotice(null)
-    const r = await speech.request(cand.text, { source, partnerSpeaking: false, speakNow: true, auto: true })
+    const r = await speech.request(cand.text, { source, partnerSpeaking: false, speakNow: true, auto: !viaSayIt })
     done(r)
   }, [speech, refreshAutoSnap])
 
   const runAutoAction = useCallback((a: AutoTurnAction) => {
     if (a.type === 'draft') void autoDraft(a.turnId)
-    else void autoSpeak(a.pick)
+    else void autoSpeak(a.pick, a.viaSayIt)
   }, [autoDraft, autoSpeak])
 
   const autoSayIt = useCallback(() => {

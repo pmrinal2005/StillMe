@@ -23,6 +23,8 @@ export interface CandidateProofPayload {
   from: string
   /** candidateId -> sha256 of the exact candidate text (lets the server tell edited from unedited honestly) */
   cands: Record<string, string>
+  /** candidateId -> the intent / risk the model reported (signed, so auto turn-taking can be re-checked by the server). Absent in older proofs. */
+  meta?: Record<string, { i: string; r: string }>
   /** expiry (ms epoch) */
   exp: number
 }

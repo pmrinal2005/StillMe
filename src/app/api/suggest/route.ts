@@ -92,7 +92,11 @@ async function handlePOST(req: Request) {
       }
       // C #31: stateless signed proof — verifiable by ANY instance (the in-memory record below is only a best-effort extra).
       const cands: Record<string, string> = {}
-      for (const c of set.candidates) cands[c.id] = await sha256Hex(c.text)
+      const meta: Record<string, { i: string; r: string }> = {}
+      for (const c of set.candidates) {
+        cands[c.id] = await sha256Hex(c.text)
+        meta[c.id] = { i: c.intent, r: c.risk }
+      }
       set.proof = await signCandidateProof(env.approvalSecret(), {
         v: 1,
         owner: id.userId,
@@ -100,6 +104,7 @@ async function handlePOST(req: Request) {
         turn: set.turn,
         from: await sha256Hex(body.partnerText),
         cands,
+        meta,
         exp: set.expiresAt,
       })
       const valid = CandidateSet.parse(set)

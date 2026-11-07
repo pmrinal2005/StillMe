@@ -453,3 +453,25 @@ describe('AutoTurnController.dismissNotice', () => {
     expect(c.snapshot(10_600).consecutive).toBe(0)
   })
 })
+
+describe('shared server/client auto-speak policy', () => {
+  it('TURN_TAKING bounds mirror the controller limits and only continue/clarify are auto-speakable', async () => {
+    const m = await import('@/lib/turn-taking')
+    expect(m.TURN_TAKING.silenceMs).toEqual({ min: m.SILENCE_MIN_MS, max: m.SILENCE_MAX_MS })
+    expect(m.TURN_TAKING.vetoMs).toEqual({ min: m.VETO_MIN_MS, max: m.VETO_MAX_MS })
+    expect([...m.TURN_TAKING.allowedIntents]).toEqual(['continue', 'clarify'])
+  })
+  it('isAutoSpeakable refuses digits, links, commitments, high-stakes words, risk and over-long text', async () => {
+    const { isAutoSpeakable } = await import('@/lib/turn-taking')
+    expect(isAutoSpeakable({ text: 'Tell me more about that.', risk: 'none' })).toBe(true)
+    for (const text of ['Meet at 5 then.', 'See www.example.com', 'Yes, I agree.', 'I will pay you.', 'Is it the doctor again?', 'x'.repeat(300)]) {
+      expect(isAutoSpeakable({ text, risk: 'none' }), text).toBe(false)
+    }
+    expect(isAutoSpeakable({ text: 'Tell me more.', risk: 'medical' })).toBe(false)
+  })
+  it('the browser picker never proposes text the server would refuse (digits are skipped)', () => {
+    const set = { candidates: [cand('a', 'continue', 'Tell me about the 5 pm plan.'), cand('b', 'clarify', 'Which plan do you mean?'), cand('c', 'decline', 'Not now.')] }
+    const r = pickCandidate(set, { intent: 'continue', partnerText: 'We should talk about the plan tomorrow.' })
+    expect(r.ok && r.candidate.id).toBe('b')
+  })
+})

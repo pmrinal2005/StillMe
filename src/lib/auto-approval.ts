@@ -45,7 +45,8 @@ export async function evaluateAutoApproval(opts: {
   const m = p.meta?.[source.candidateId]
   if (!m) return deny('meta_missing', 'This suggestion was not marked safe for automatic speech.')
   const cand: Candidate = { id: source.candidateId, text: opts.text, intent: m.i as Candidate['intent'], risk: m.r as Candidate['risk'] }
-  if (!TURN_TAKING.allowedIntents.includes(cand.intent)) return deny('intent', 'Only a neutral continuation or a clarifying question can be said automatically.')
+  const intentOk = TURN_TAKING.allowedIntents.includes(cand.intent) || (cand.intent === 'decline' && auto.prefer === 'decline')
+  if (!intentOk) return deny('intent', 'Only a neutral continuation or a clarifying question can be said automatically.')
   if (cand.risk !== 'none') return deny('risk', 'This reply touches an important topic, so it is not said automatically.')
   if (!isAutoSpeakable(cand)) return deny('content', 'This reply contains something that needs your own decision, so it is not said automatically.')
   const partner = source.draftedFrom ?? ''
