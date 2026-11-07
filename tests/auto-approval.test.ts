@@ -53,8 +53,13 @@ describe('server backstop for auto approvals', () => {
     expect(await run(await fixture({ risk: 'medical' }))).toMatchObject({ ok: false, reason: 'risk' })
   })
   it('refuses commitment-shaped text', async () => {
-    for (const text of ['Yes, I agree.', 'I will pay you $20.', 'Meet at 5 then.']) {
+    for (const text of ['Yes, I agree.', 'I will pay you $20.', 'Sure, see https://example.com/pay', 'Email me at a@b.org']) {
       expect(await run(await fixture({ text })), text).toMatchObject({ ok: false, reason: 'content' })
+    }
+  })
+  it('TODO1: numbers and dates are allowed in an automatic reply (only links/e-mail/money are blocked)', async () => {
+    for (const text of ['What time on March 3rd?', 'Which room, 12 or 14?', 'Tell me more about the 5 pm plan.']) {
+      expect(await run(await fixture({ text, intent: 'clarify' })), text).toMatchObject({ ok: true })
     }
   })
   it('refuses when the partner turn it answers is sensitive or trivial', async () => {

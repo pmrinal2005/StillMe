@@ -78,7 +78,7 @@ export const api = {
     }),
   suggest: (req: SuggestRequest, signal?: AbortSignal) => call<{ set: CandidateSet }>('/api/suggest', { method: 'POST', body: JSON.stringify(req), signal }),
   startSession: (b: { mode: string; voiceId: string; outputLanguage: string; inputLanguages: string[]; keyterms: string[]; contextPrompt?: string; minutes?: number; replace?: boolean; sttProfile?: 'flagship' | 'economy' }) =>
-    call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; ticket: string; maxSessionMinutes: number; generation: number; sttProfile: 'flagship' | 'economy' }>('/api/livekit/session', {
+    call<{ url: string; token: string; room: string; conversationId: string; invite: string | null; inviteExpiresAt?: number | null; ticket: string; maxSessionMinutes: number; generation: number; sttProfile: 'flagship' | 'economy' }>('/api/livekit/session', {
       method: 'POST',
       body: JSON.stringify({ ...b, ticket: sessionTicket ?? undefined }),
     }),

@@ -48,7 +48,17 @@ ADDONS = {
 # Application limits (intersect with web-app ledgers and Supabase reservations).
 SESSION_MAX_MINUTES = 20
 SESSION_TTS_CHAR_CAP = 5000
-OWNER_GONE_GRACE_S = 30
+# Owner-gone grace by conversation mode. MUST equal OWNER_GONE_GRACE_S in src/lib/session-policy.ts.
+# tabletop: the owner's device IS the microphone, so 30 s is plenty. partner-link / remote: the partner keeps talking while the
+# owner's phone is locked / switches network / reloads, so the worker waits 2 minutes before it ends the room.
+OWNER_GONE_GRACE_BY_MODE = {"tabletop": 30, "partner-link": 120, "remote": 120}
+OWNER_GONE_GRACE_S = OWNER_GONE_GRACE_BY_MODE["tabletop"]  # legacy name (tabletop value)
+
+
+def owner_gone_grace_s(mode: str | None) -> int:
+    return OWNER_GONE_GRACE_BY_MODE.get(mode or "tabletop", OWNER_GONE_GRACE_BY_MODE["tabletop"])
+
+
 IDLE_NO_AUDIO_S = 5 * 60
 PHONE_MONTHLY_MINUTES_CAP = 40
 PHONE_MAX_CALL_MINUTES = 15

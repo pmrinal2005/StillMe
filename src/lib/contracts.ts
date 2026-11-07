@@ -159,6 +159,7 @@ export const DataTopics = {
   control: 'revoice.control', // owner → worker (approve / stop / pause)
   status: 'revoice.status', // worker → owner (speaking / done / uncertain / error)
   presence: 'revoice.presence', // owner → partner (composing indicator, no draft content)
+  relay: 'revoice.relay', // owner ⇄ partner: worker-less captions (partner phone transcribes, owner receives turns)
 } as const
 
 export const TranscriptMessage = z.object({
@@ -194,3 +195,21 @@ export const StatusMessage = z.object({
 })
 
 export const PresenceMessage = z.object({ type: z.literal('presence'), composing: z.boolean(), holdTurn: z.boolean().optional() })
+
+/**
+ * Worker-less captions ("partner-phone relay STT"). When no voice worker is transcribing a partner-link / remote session,
+ * the OWNER device reserves listening minutes (same ledger as any listening) and hands the partner's phone a short-lived
+ * AssemblyAI streaming URL over the data channel (addressed to that partner only). The partner's phone transcribes ITS OWN
+ * microphone and relays the turns back. The owner only ever accepts relay turns from `partner-…` participants while a relay is on.
+ */
+// z.union (not discriminatedUnion): two variants share type 'relay' (on:true / on:false), which zod rejects as a duplicate discriminator.
+export const RelayToPartner = z.union([
+  z.object({ type: z.literal('relay'), on: z.literal(true), wsUrl: z.string().max(4000), maxSessionSeconds: z.number().int().min(30).max(1800) }),
+  z.object({ type: z.literal('relay'), on: z.literal(false) }),
+  /** The owner's voice is playing near the partner: send silence to STT while `on` (auto-expires after ttlMs). */
+  z.object({ type: z.literal('relay_gate'), on: z.boolean(), ttlMs: z.number().int().min(0).max(120_000).optional() }),
+])
+export const RelayFromPartner = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('relay_turn'), turnId: z.number().int().min(0).max(9999), text: z.string().max(4000), endOfTurn: z.boolean() }),
+  z.object({ type: z.literal('relay_status'), state: z.enum(['listening', 'closed', 'error']), detail: z.string().max(80).optional() }),
+])

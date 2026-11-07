@@ -4,6 +4,8 @@ import { env } from './env'
 import { hmacSha256Hex, randomId, timingSafeEqualHex } from '../hash'
 import { openRoomMeta, sealRoomMeta } from '../room-seal'
 import { ROOM_RE } from '../spend-refs'
+import { CLAIM_PREFIX, INVITE_PREFIX, PARTNER_IDENTITY_RE, parseClaimSyntax, parseInviteSyntax } from '../invite-link'
+import { roomTimeouts } from '../session-policy'
 
 /**
  * Short-lived, least-privilege LiveKit participant tokens.
@@ -119,11 +121,12 @@ export async function ownerToken(opts: { identity: string; room: string; mode: R
   return at.toJwt()
 }
 
-export async function partnerToken(opts: { room: string; label: string }) {
+export async function partnerToken(opts: { room: string; label: string; identity?: string }) {
   const key = env.livekitKey()
   const secret = env.livekitSecret()
   if (!key || !secret) throw new Error('LiveKit not configured')
-  const identity = `partner-${randomId(6)}`
+  // A claim-based re-join keeps the SAME identity (LiveKit replaces the ghost connection of that identity).
+  const identity = opts.identity && PARTNER_IDENTITY_RE.test(opts.identity) ? opts.identity : `partner-${randomId(6)}`
   const at = new AccessToken(key, secret, { identity, name: opts.label.slice(0, 40), ttl: TOKEN_TTL_SECONDS, attributes: { role: 'partner' } })
   at.addGrant({
     room: opts.room,
@@ -131,7 +134,9 @@ export async function partnerToken(opts: { room: string; label: string }) {
     canSubscribe: true,
     canPublish: true,
     canPublishSources: [TrackSource.MICROPHONE], // B1: enum, not string
-    canPublishData: false,
+    // Worker-less captions: the partner's phone relays its OWN transcript turns to the owner over the data channel. The worker
+    // only accepts `revoice.control` from the owner identity, and the owner only accepts `revoice.relay` turns from `partner-…`.
+    canPublishData: true,
     canUpdateOwnMetadata: false,
   })
   return { token: await at.toJwt(), identity }
@@ -145,10 +150,12 @@ export async function partnerToken(opts: { room: string; label: string }) {
 export async function createRoomAndDispatch(room: string, meta: RoomMetadata, worker: WorkerConfig) {
   const host = hostUrl()
   const rs = new RoomServiceClient(host, env.livekitKey()!, env.livekitSecret()!)
+  // Mode-aware: a partner needs time to open the link and a reloading phone must not close the room (see session-policy.ts).
+  const t = roomTimeouts(meta.mode)
   await rs.createRoom({
     name: room,
-    emptyTimeout: 120,
-    departureTimeout: 30,
+    emptyTimeout: t.emptyTimeout,
+    departureTimeout: t.departureTimeout,
     maxParticipants: ROOM_MAX_PARTICIPANTS,
     metadata: await sealRoomMeta(env.approvalSecret(), room, meta),
   })
@@ -250,7 +257,7 @@ export async function listAllOwnerRooms(): Promise<{ room: string; meta: RoomMet
  *  - every invite has a random id (`jti`) that /api/livekit/join consumes ATOMICALLY (single use, any instance);
  *  - the owner mints a fresh invite for each additional partner (/api/livekit/invite).
  */
-export const INVITE_PREFIX = 'rvi1'
+export { INVITE_PREFIX, CLAIM_PREFIX }
 
 export async function signInvite(room: string, ownerUserId: string, now = Date.now()) {
   const jti = randomId(12)
@@ -260,18 +267,34 @@ export async function signInvite(room: string, ownerUserId: string, now = Date.n
 }
 
 /** Syntax only — NOT trusted until verifyInvite() succeeds with the owner read from the room. */
-export function parseInvite(invite: string): { room: string; jti: string; exp: number; sig: string } | null {
-  const parts = invite.split('.')
-  if (parts.length !== 5 || parts[0] !== INVITE_PREFIX) return null
-  const [, room, jti, expS, sig] = parts
-  const exp = Number(expS)
-  if (!ROOM_RE.test(room) || !/^[a-f0-9]{24}$/.test(jti) || !Number.isFinite(exp) || !/^[a-f0-9]{64}$/.test(sig)) return null
-  return { room, jti, exp, sig }
-}
+export const parseInvite = parseInviteSyntax
 
 export async function verifyInvite(invite: string, ownerUserId: string, now = Date.now()): Promise<{ room: string; jti: string; exp: number } | null> {
   const p = parseInvite(invite)
   if (!p || now > p.exp) return null
   const expected = await hmacSha256Hex(env.approvalSecret(), `invite:${p.room}:${p.jti}:${p.exp}:${ownerUserId}`)
   return timingSafeEqualHex(expected, p.sig) ? { room: p.room, jti: p.jti, exp: p.exp } : null
+}
+
+/**
+ * Claim-based re-join. Consuming an invite burns it, so a partner whose phone reloads / locks / changes network used to be
+ * locked out of their own conversation. The join response now carries a CLAIM bound to (room, partner identity, owner, expiry);
+ * the same device presents it to get a fresh token for the SAME identity. Expiry = the room's own lifetime (+1 min), never longer.
+ *   rvc1.<room>.<identity>.<exp>.<sig>   sig = HMAC(secret, "claim:<room>:<identity>:<exp>:<owner user id>")
+ */
+export function claimExpiry(meta: Pick<RoomMetadata, 'startedAt' | 'maxSessionMinutes'>, now = Date.now()): number {
+  const end = (meta.startedAt ?? now) + (meta.maxSessionMinutes ?? 20) * 60_000 + 60_000
+  return Math.max(now + 60_000, Math.min(end, now + 30 * 60_000))
+}
+
+export async function signClaim(room: string, identity: string, ownerUserId: string, exp: number) {
+  const sig = await hmacSha256Hex(env.approvalSecret(), `claim:${room}:${identity}:${exp}:${ownerUserId}`)
+  return `${CLAIM_PREFIX}.${room}.${identity}.${exp}.${sig}`
+}
+
+export async function verifyClaim(claim: string, ownerUserId: string, now = Date.now()): Promise<{ room: string; identity: string; exp: number } | null> {
+  const p = parseClaimSyntax(claim)
+  if (!p || now > p.exp) return null
+  const expected = await hmacSha256Hex(env.approvalSecret(), `claim:${p.room}:${p.identity}:${p.exp}:${ownerUserId}`)
+  return timingSafeEqualHex(expected, p.sig) ? { room: p.room, identity: p.identity, exp: p.exp } : null
 }

@@ -86,8 +86,12 @@ export function partnerAsked(text: string): boolean {
 }
 
 // ------------------------------------------------------------------------------------------------ server/client shared policy
-/** Digits, currency, links and e-mail addresses: specifics (dates, prices, numbers) the owner must choose themself. */
-const SPECIFICS = /\d|https?:|www\.|\S+@\S+\.\S+/i
+/**
+ * Links and e-mail addresses are never spoken automatically (they cannot be checked by ear and are a phishing/injection vector).
+ * Plain numbers and dates ("at 5", "on March 3rd", "room 12") ARE allowed: they are ordinary conversation. Money and other
+ * high-stakes specifics are still blocked by HIGH_STAKES ($5, dollars, price, pay ...) and by the `risk` category.
+ */
+const SPECIFICS = /https?:|www\.|\b[\w-]+\.(?:com|net|org|io|app|co|dev|me|ly|gov|edu)\b|\S+@\S+\.\S+/i
 
 /** Policy shared by the browser (what it proposes) and the server backstop (what it will sign for an `auto` approval). */
 export const TURN_TAKING = {
@@ -105,7 +109,7 @@ export const TURN_TAKING = {
 /** The partner's words are about health, legal, money, consent or another matter a machine must not answer for the owner. */
 export const isSensitivePartnerText = (s: string): boolean => HIGH_STAKES.test(s)
 
-/** Server-side content check for a candidate that is about to be spoken automatically (stricter than the picker: no digits/links). */
+/** Server-side content check for a candidate that is about to be spoken automatically (links and e-mail addresses are blocked; numbers and dates are allowed). */
 export function isAutoSpeakable(c: Pick<Candidate, 'text' | 'risk'>): boolean {
   const t = c.text.trim()
   if (!t || t.length > MAX_AUTO_CHARS) return false
@@ -249,7 +253,7 @@ export function candidateProblem(c: Candidate, pref: IntentPref): { reason: stri
   const text = c.text.trim()
   if (!text) return { reason: 'empty', message: 'The draft was empty.' }
   if (text.length > MAX_AUTO_CHARS) return { reason: 'too_long', message: 'The draft was too long to speak automatically.' }
-  if (SPECIFICS.test(text)) return { reason: 'specifics', message: 'That draft contains a number, date or link, so I did not speak it.' }
+  if (SPECIFICS.test(text)) return { reason: 'specifics', message: 'That draft contains a link or e-mail address, so I did not speak it.' }
   if (isHighStakesText(text)) return { reason: 'high_stakes_candidate', message: 'That draft mentions a high-stakes subject, so I did not speak it.' }
   // Committing words are blocked for every intent except an explicit "decline" preference (declining is the owner's own choice).
   if (pref !== 'decline' && isCommitmentText(text)) return { reason: 'commitment', message: 'That draft agrees to something on your behalf, so I did not speak it.' }

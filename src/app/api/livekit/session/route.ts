@@ -154,7 +154,9 @@ async function handlePOST(req: Request) {
       sttReservationId,
     })
     logEvent({ evt: 'session_start', room, kind: b.mode, minutes })
-    return json({ url: env.livekitUrl(), token, room, conversationId, invite, ticket, maxSessionMinutes: minutes, generation: 0, sttProfile: spend.profile })
+    // `invite` MUST be the link string (the client builds /join#<invite> from it). signInvite() returns {invite, jti, exp}; returning the
+    // whole object made the partner link read /join#[object Object].
+    return json({ url: env.livekitUrl(), token, room, conversationId, invite: invite?.invite ?? null, inviteExpiresAt: invite?.exp ?? null, ticket, maxSessionMinutes: minutes, generation: 0, sttProfile: spend.profile })
   } catch (e) {
     // B3/B7: never leak the room or the reservation; return a JSON error instead of an empty 500.
     if (roomCreated) await deleteRoom(room)

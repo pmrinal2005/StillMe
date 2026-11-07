@@ -40,7 +40,10 @@ describe('B1 — LiveKit grants use the TrackSource enum', () => {
       const c = claims(token)
       expect(identity).toMatch(/^partner-/)
       expect(c.video.canPublishSources).toEqual(['microphone'])
-      expect(c.video.canPublishData).toBe(false)
+      // Partner phones relay their own transcript turns (worker-less captions) over the data channel. The worker only accepts
+      // control from the OWNER identity and the owner only accepts relay turns from `partner-…`, so this grants no control.
+      expect(c.video.canPublishData).toBe(true)
+      expect(c.attributes.role).toBe('partner')
     })
 
     it('ownerToken works in tabletop (mic) and partner-link (no publish) modes', async () => {

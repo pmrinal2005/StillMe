@@ -35,6 +35,8 @@ import { FALLBACK_REJECTIONS, SpeechController, type SpeakSource } from '@/lib/c
 import { DirectSttListener, LiveKitListener, type TurnUpdate } from '@/lib/client/listening'
 import { PRESENCE_LABELS, WorkerPresenceMonitor, type PresenceSnapshot } from '@/lib/client/worker-presence'
 import { effectiveMode, modeAvailable } from '@/lib/session-mode'
+import { backgroundPolicy, relayDesired, workerAbsentAction } from '@/lib/session-policy'
+import { formatRemaining, inviteExpiresAt } from '@/lib/invite-link'
 import { fallbackAudibleToPartner, fallbackNotice, OWNER_FALLBACK_GATES_WORKER } from '@/lib/audio-routing'
 import { count, noteTts, recordInterval } from '@/lib/client/metrics'
 import { FloatingTip, useFloatingTip } from './ui/FloatingTip'
@@ -153,6 +155,10 @@ export function ReVoiceApp() {
   const presenceRef = useRef<WorkerPresenceMonitor | null>(null)
   const presenceTick = useRef<ReturnType<typeof setInterval> | null>(null)
   const workerGated = useRef(false)
+  /** Worker-less captions: the relay's own pseudo-session (reserved minutes) so it is settled like any listening. */
+  const relayRef = useRef<{ session: string; ticket?: string } | null>(null)
+  const relayBusy = useRef(false)
+  const [relayOn, setRelayOn] = useState(false)
   const playerRef = useRef<PcmStreamPlayer | null>(null)
   if (!playerRef.current && typeof window !== 'undefined') playerRef.current = new PcmStreamPlayer()
   // auto turn-taking
@@ -320,6 +326,7 @@ export function ReVoiceApp() {
           if (needGate !== workerGated.current) {
             workerGated.current = needGate
             void l.gateWorker(needGate)
+            void l.relayGate(needGate) // worker-less captions: the partner phone sends silence to STT while our voice plays
           }
         }
       },
@@ -800,6 +807,9 @@ export function ReVoiceApp() {
     presenceTick.current = null
     presenceRef.current = null
     workerGated.current = false
+    relayRef.current = null
+    relayBusy.current = false
+    setRelayOn(false)
     speech?.setRouteSource(undefined)
     setWorker(null)
     listenerRef.current = null
@@ -833,6 +843,7 @@ export function ReVoiceApp() {
     const ticket = s?.ticket ?? getSessionTicket()
     endedRef.current = s ?? null // closed events fired by our own close() must not re-enter
     speech?.onRoomLost()
+    if (relayRef.current) await stopRelayRef.current?.() // worker-less captions: settle the relay's own reservation first
     await l?.close().catch(() => undefined)
     if (s?.kind === 'livekit' && s.room) await api.endSession(s.room, reason, ticket).catch(() => undefined)
     else if (s?.kind === 'direct' && s.sttSession) await api.endSession(s.sttSession, reason, s.ticket ?? null).catch(() => undefined) // A7
@@ -862,6 +873,7 @@ export function ReVoiceApp() {
       if (s.type === 'ready' && presenceRef.current) {
         presenceRef.current.workerReady()
         setWorker(presenceRef.current.snapshot())
+        if (relayRef.current) void stopRelayRef.current?.() // a worker is transcribing: never two paid streams on the same audio
       }
       // C #20: speech statuses are applied by the controller ONLY when they carry the current attempt's id.
       speech?.onWorkerStatus(s)
@@ -916,7 +928,22 @@ export function ReVoiceApp() {
         setNotice('Your connection was restored. Earlier suggestions were cleared because you may have missed some of what was said.')
       }).catch(() => undefined)
     },
-    onPartnerPresence: (p: boolean) => setPartnerPresent(p),
+    onPartnerPresence: (p: boolean) => {
+      setPartnerPresent(p)
+      // A partner arrived (or another one is still here after the transcribing phone left) while no worker transcribes: (re)start the relay.
+      if (p && sessionRef.current?.mode !== 'tabletop' && relayDesired({ mode: sessionRef.current?.mode ?? 'tabletop', workerState: presenceRef.current?.state, partnerPresent: true, browserStt: !!statusRef.current?.providers.browserStt }) && !relayRef.current) void startRelayRef.current?.()
+    },
+    onRelayStatus: (st: { state: 'listening' | 'closed' | 'error'; detail?: string }) => {
+      if (st.state === 'listening') return
+      // The partner phone stopped transcribing (left, muted the page, network): settle and try the next partner if there is one.
+      if (relayRef.current) {
+        void stopRelayRef.current?.().then(() => {
+          const cur = sessionRef.current
+          if (cur && cur.mode !== 'tabletop' && relayDesired({ mode: cur.mode, workerState: presenceRef.current?.state, partnerPresent: (listenerRef.current as LiveKitListener | null)?.hasPartner ?? false, browserStt: !!statusRef.current?.providers.browserStt }) && st.detail === 'partner_left') void startRelayRef.current?.()
+          else setNotice('Captions from your partner\u2019s phone stopped. Speak still works. Ask them to rejoin to get captions back.')
+        })
+      }
+    },
     onAgentPresence: (present: boolean) => {
       const m = presenceRef.current
       if (!m) return
@@ -932,6 +959,55 @@ export function ReVoiceApp() {
       setWorker(m.snapshot())
     },
   }), [onTurn, speech, cleanupSession, endSession])
+
+  // ---------------------------------------------------------------- worker-less captions (partner-phone relay)
+  const stopRelay = useCallback(async () => {
+    const r = relayRef.current
+    relayRef.current = null
+    setRelayOn(false)
+    const l = listenerRef.current
+    if (l instanceof LiveKitListener) await l.stopRelay().catch(() => undefined)
+    // The relay reserved listening minutes like any other listening: settle them (elapsed committed, the rest refunded).
+    if (r) await api.endSession(r.session, 'user', r.ticket ?? null).catch(() => undefined)
+  }, [])
+
+  /** Start relay captions: reserve minutes, then hand the partner's phone a short-lived AssemblyAI URL. Never runs next to a working voice worker. */
+  const startRelay = useCallback(async () => {
+    const l = listenerRef.current
+    const s = sessionRef.current
+    if (relayBusy.current || relayRef.current || !(l instanceof LiveKitListener) || !s || s.kind !== 'livekit' || s.mode === 'tabletop') return
+    if (!l.hasPartner) return
+    relayBusy.current = true
+    try {
+      const prefs = prefsRef.current
+      const langs = prefs.inputLanguages.filter((c): c is (typeof INPUT_LANGUAGES)[number] => (INPUT_LANGUAGES as readonly string[]).includes(c))
+      const r = await api.sttToken({ sampleRate: 16000, languageCodes: langs, keyterms: prefs.keyterms, minutes: Math.max(1, Math.min(20, s.maxMinutes)) })
+      if (sessionRef.current !== s || presenceRef.current?.state === 'ready') {
+        // The session ended, or the worker arrived while we were minting: never run two paid streams on the same audio.
+        if (r.session) await api.endSession(r.session, 'error', r.ticket ?? null).catch(() => undefined)
+        return
+      }
+      relayRef.current = { session: r.session ?? '', ticket: r.ticket }
+      const delivered = await l.startRelay(r.wsUrl, r.maxSessionSeconds).catch(() => false)
+      if (!delivered) {
+        await stopRelay()
+        return
+      }
+      setRelayOn(true)
+      setListening('listening')
+      setNotice('No voice worker is running, so your partner\u2019s phone is transcribing their speech. Captions appear here; Speak still works.')
+    } catch (e) {
+      const code = e instanceof ApiError ? e.code : (e as Error).message
+      await stopRelay()
+      setNotice(`Captions are unavailable right now (${String(code).replace(/_/g, ' ')}). Speak still works from this device.`)
+    } finally {
+      relayBusy.current = false
+    }
+  }, [stopRelay])
+  const startRelayRef = useRef(startRelay)
+  startRelayRef.current = startRelay
+  const stopRelayRef = useRef(stopRelay)
+  stopRelayRef.current = stopRelay
 
   /** Listening via the LiveKit worker. 'failed' = could not start (the caller may fall back to direct listening). */
   const startLivekitSession = async (): Promise<'started' | 'cancelled' | 'failed'> => {
@@ -993,14 +1069,27 @@ export function ReVoiceApp() {
             const prev = lastState
             lastState = monitor.state
             setWorker(monitor.snapshot())
-            if (monitor.state === 'absent' && s.mode === 'tabletop' && statusRef.current?.providers.browserStt) {
+            const bstt = !!statusRef.current?.providers.browserStt
+            const action = monitor.state === 'absent' || monitor.state === 'lost' ? workerAbsentAction(s.mode, bstt) : null
+            if (monitor.state === 'absent' && action === 'fallback_direct') {
               // Guests must always be able to listen: a tabletop session does not need the worker, so switch to direct listening now.
               void fallbackRef.current?.('the voice worker did not join')
-            } else if (monitor.state === 'absent') setNotice('The voice worker has not joined. Your approved words will be spoken from this device. Listening needs the worker — the session ends automatically if it does not arrive.')
-            else if (monitor.state === 'lost') setNotice('The voice worker disconnected. Speech continues from this device; listening resumes if it reconnects.')
-            else if (monitor.state === 'ready' && (prev === 'absent' || prev === 'lost' || prev === 'degraded')) setNotice('The voice worker is connected again. Listening and room speech are back.')
+            } else if (monitor.state === 'absent' || monitor.state === 'lost') {
+              // Partner-link / remote: NEVER auto-kill the room. The partner's phone relays captions; otherwise typed speech keeps working.
+              if (action === 'relay') {
+                if ((listenerRef.current as LiveKitListener | null)?.hasPartner) void startRelayRef.current?.()
+                else setNotice('The voice worker is not running. Captions will start on your partner\u2019s phone as soon as they join. Speak still works from this device.')
+              } else if (action === 'keep') setNotice('The voice worker is not running and phone captions are unavailable. Speak still works from this device; the conversation stays open.')
+              else if (monitor.state === 'lost') setNotice('The voice worker disconnected. Speech continues from this device; listening resumes if it reconnects.')
+            } else if (monitor.state === 'ready' && (prev === 'absent' || prev === 'lost' || prev === 'degraded')) {
+              // A worker is transcribing again: switch the partner phone off so two paid streams never run on the same audio.
+              if (relayRef.current) void stopRelayRef.current?.()
+              setNotice('The voice worker is connected again. Listening and room speech are back.')
+            }
           }
           if (verdict === 'end') {
+            // Only a tabletop session is ever ended for a missing worker (and only when direct listening is unavailable).
+            if (s.mode !== 'tabletop') return
             if (statusRef.current?.providers.browserStt) void fallbackRef.current?.('no voice worker was available')
             else void endSession('error').then(() => setNotice('Listening ended: no voice worker was available to transcribe, so the room was closed and unused listening minutes were released. Typing, phrases and speech still work.'))
           }
@@ -1112,22 +1201,32 @@ export function ReVoiceApp() {
     else if (l instanceof DirectSttListener) await endSession('user') // direct mode: pausing = disconnecting (stops billing)
   }
 
-  // Close streams on genuine breaks: tab hidden for a long time ends the session; page unload ends it.
+  // Close streams on genuine breaks. The rule depends on the conversation mode (src/lib/session-policy.ts):
+  //   tabletop            this device IS the microphone, so a hidden page cannot listen: end after 3 min hidden / on pagehide.
+  //   partner-link/remote the partner keeps talking while the owner's phone is locked or switches apps: pagehide NEVER ends the
+  //                       room (the worker's 2-minute owner-gone grace and the room's departure timeout close it if the owner
+  //                       never returns), and a hidden tab is tolerated for 10 minutes.
   useEffect(() => {
+    const mode = () => sessionRef.current?.mode ?? 'tabletop'
+    const hiddenTooLong = () => !!(hiddenAt.current && sessionRef.current && Date.now() - hiddenAt.current > backgroundPolicy(mode()).hiddenEndMs)
     const onVis = () => {
       if (document.hidden) hiddenAt.current = Date.now()
       else {
-        if (hiddenAt.current && sessionRef.current && Date.now() - hiddenAt.current > IDLE_BACKGROUND_END_MS) void endSession('idle')
+        if (hiddenTooLong()) void endSession('idle')
         hiddenAt.current = null
       }
     }
     const bgCheck = setInterval(() => {
-      if (hiddenAt.current && sessionRef.current && Date.now() - hiddenAt.current > IDLE_BACKGROUND_END_MS) void endSession('idle')
+      if (hiddenTooLong()) void endSession('idle')
     }, 30_000)
-    const onUnload = () => {
+    const onUnload = (ev?: Event) => {
       const s = sessionRef.current
-      const room = s?.kind === 'livekit' ? s.room : s?.sttSession // A7: direct sessions are settled too
-      if (s && room) navigator.sendBeacon?.('/api/livekit/end', new Blob([JSON.stringify({ room, reason: 'idle', ticket: s.ticket ?? getSessionTicket() ?? undefined })], { type: 'application/json' }))
+      if (!s) return
+      // A page that is only being put into the back/forward cache (persisted) is not closing at all.
+      if ((ev as PageTransitionEvent | undefined)?.persisted) return
+      if (!backgroundPolicy(s.mode).pagehideEnds) return // partner-link / remote: grace period instead of ending the partner's conversation
+      const room = s.kind === 'livekit' ? s.room : s.sttSession // A7: direct sessions are settled too
+      if (room) navigator.sendBeacon?.('/api/livekit/end', new Blob([JSON.stringify({ room, reason: 'idle', ticket: s.ticket ?? getSessionTicket() ?? undefined })], { type: 'application/json' }))
     }
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('pagehide', onUnload)
@@ -1476,17 +1575,17 @@ export function ReVoiceApp() {
                         )}
                         {session.kind === 'livekit' && worker && (worker.state === 'absent' || worker.state === 'lost') && (
                           <p role="status" className="rv-alert rv-alert-warn text-sm">
-                            <Icon name="alert" size={15} /> No voice worker — captions are unavailable, but Speak still works from this device. This session ends automatically if the worker does not arrive.
+                            <Icon name="alert" size={15} /> {relayOn ? 'No voice worker is running — your partner\u2019s phone is transcribing instead. Captions appear here and Speak still works.' : 'No voice worker is running. Captions start on your partner\u2019s phone once they join; until then Speak still works from this device. The conversation stays open.'}
                           </p>
                         )}
                         {session.kind === 'livekit' && worker && worker.route === 'direct' && worker.state !== 'connecting' && !fallbackAudibleToPartner(session.mode) && (
                           <p id="remote-fallback-warning" role="alert" className="rv-alert rv-alert-warn text-sm">
-                            <Icon name="alert" size={15} /> Remote call: until the voice worker is connected, Speak plays on this device only. Your remote partner will not hear it.
+                            <Icon name="alert" size={15} /> Remote call: until the voice worker is connected, Speak plays on this device only. Your remote partner will not hear it (captions can still come from their phone).
                           </p>
                         )}
                         {inviteUrl && (
                           <div className="grid gap-1">
-                            <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (single use, expires in 30 min)</label>
+                            <label htmlFor="invite-url" className="text-sm font-semibold">Partner link (single use){(() => { const exp = inviteExpiresAt(session?.invite); return exp ? <> · <span id="invite-countdown" className={exp - clock < 5 * 60_000 ? 'rv-text-danger' : 'rv-muted'}>{exp - clock > 0 ? `expires in ${formatRemaining(exp - clock)}` : 'expired — press New link'}</span></> : null })()}</label>
                             <div className="flex flex-col gap-2 min-[420px]:flex-row">
                               <input id="invite-url" className="rv-input min-w-0 flex-1 text-sm" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} />
                               <button className="rv-btn" onClick={() => void navigator.clipboard?.writeText(inviteUrl)}><Icon name="copy" size={15} /> Copy</button>

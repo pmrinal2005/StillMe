@@ -9,7 +9,8 @@
  *                     synthesized output is never transcribed as partner input.
  */
 import { Room, RoomEvent, Track, type RemoteParticipant, type LocalTrackPublication } from 'livekit-client'
-import { ControlMessage, DataTopics, StatusMessage, TranscriptMessage, type Approval } from '../contracts'
+import { ControlMessage, DataTopics, RelayFromPartner, RelayToPartner, StatusMessage, TranscriptMessage, type Approval } from '../contracts'
+import { isPartnerPeer, RELAY_TURN_STRIDE } from '../relay'
 import { ownerPlaysLocally, type ConversationMode } from '../audio-routing'
 import { CAPTURE_WORKLET_SRC } from './downsample'
 import { EnergyVad, VoiceActivityEmitter } from '../energy-vad'
@@ -32,6 +33,8 @@ export interface ListenerEvents {
   onAgentPresence?: (present: boolean) => void
   /** F: the owner's room connection came back after a gap — the app must obtain a NEW generation. */
   onReconnected?: () => void
+  /** Worker-less captions: the partner's phone reports whether its relay transcription is running. */
+  onRelayStatus?: (s: { state: 'listening' | 'closed' | 'error'; detail?: string }) => void
 }
 
 const enc = new TextEncoder()
@@ -57,6 +60,12 @@ export class LiveKitListener {
     this.room = room
     room
       .on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: RemoteParticipant, _kind?: unknown, topic?: string) => {
+        // Worker-less captions: relay turns are accepted ONLY while a relay is on and ONLY from a `partner-…` participant
+        // (server-signed role attribute). Anything else on this topic is ignored.
+        if (topic === DataTopics.relay) {
+          if (this.relayEpoch > 0 && this.relayOn && isPartnerPeer(participant) && participant?.identity === this.relayTarget) this.onRelayMessage(payload)
+          return
+        }
         // Only trust transcript/status from the agent participant.
         if (!participant || !participant.isAgent) return
         try {
@@ -93,7 +102,16 @@ export class LiveKitListener {
       })
       .on(RoomEvent.Disconnected, () => this.ev.onStatus({ state: 'closed' }))
       .on(RoomEvent.ParticipantConnected, (p) => (p.isAgent ? this.onAgent(true) : this.ev.onPartnerPresence?.(true)))
-      .on(RoomEvent.ParticipantDisconnected, (p) => (p.isAgent ? this.onAgent(false) : this.ev.onPartnerPresence?.(false)))
+      .on(RoomEvent.ParticipantDisconnected, (p) => {
+        if (p.isAgent) return this.onAgent(false)
+        // The partner whose phone was transcribing left: the relay is over (the app restarts it for another partner if needed).
+        if (this.relayOn && p.identity === this.relayTarget) {
+          this.relayOn = false
+          this.relayTarget = null
+          this.ev.onRelayStatus?.({ state: 'closed', detail: 'partner_left' })
+        }
+        this.ev.onPartnerPresence?.(this.hasPartner)
+      })
     // B6: in partner-link mode this device never plays room audio, so it does not even subscribe to it
     // (data-channel transcripts/status still arrive). Tabletop/remote subscribe as before.
     await room.connect(this.opts.url, this.opts.token, { autoSubscribe: this.opts.mode !== 'partner-link' })
@@ -104,6 +122,74 @@ export class LiveKitListener {
       this.micPub = await room.localParticipant.setMicrophoneEnabled(true)
     }
     this.ev.onStatus({ state: 'listening' })
+  }
+
+  // ---------------------------------------------------------------- worker-less captions (partner-phone relay)
+  private relayEpoch = 0
+  private relayOn = false
+  /** Identity of the ONE partner phone that transcribes (the earliest to join). */
+  private relayTarget: string | null = null
+
+  get relayActive() {
+    return this.relayOn
+  }
+
+  private partnerIds() {
+    return this.room ? Array.from(this.room.remoteParticipants.values()).filter((p) => isPartnerPeer(p)).map((p) => p.identity) : []
+  }
+
+  private onRelayMessage(payload: Uint8Array) {
+    try {
+      const m = RelayFromPartner.safeParse(JSON.parse(dec.decode(payload)))
+      if (!m.success) return
+      if (m.data.type === 'relay_turn') {
+        // Each relay stream restarts its turn counter at 0: offset by the epoch so a restarted stream never overwrites older turns.
+        this.ev.onTurn({ turnId: this.relayEpoch * RELAY_TURN_STRIDE + m.data.turnId, text: m.data.text, endOfTurn: m.data.endOfTurn })
+        if (m.data.text) this.ev.onVoiceActivity?.(Date.now())
+      } else this.ev.onRelayStatus?.({ state: m.data.state, detail: m.data.detail })
+    } catch {}
+  }
+
+  /** Hand the partner's phone a short-lived AssemblyAI streaming URL (addressed to partners only). Returns false if nobody can receive it. */
+  async startRelay(wsUrl: string, maxSessionSeconds: number): Promise<boolean> {
+    const target = this.earliestPartner()
+    if (!target) return false
+    this.relayEpoch += 1
+    this.relayTarget = target
+    this.relayOn = true
+    try {
+      await this.send(DataTopics.relay, RelayToPartner.parse({ type: 'relay', on: true, wsUrl, maxSessionSeconds }), [target])
+    } catch (e) {
+      this.relayOn = false
+      this.relayTarget = null
+      throw e
+    }
+    return true
+  }
+
+  async stopRelay() {
+    if (!this.relayOn) return
+    const target = this.relayTarget
+    this.relayOn = false
+    this.relayTarget = null
+    if (target) await this.send(DataTopics.relay, { type: 'relay', on: false }, [target]).catch(() => undefined)
+  }
+
+  /** Our own voice is playing near the partner: their phone must send silence to STT meanwhile. */
+  async relayGate(on: boolean, ttlMs = 60_000) {
+    if (this.relayOn && this.relayTarget) await this.send(DataTopics.relay, { type: 'relay_gate', on, ttlMs }, [this.relayTarget]).catch(() => undefined)
+  }
+
+  private earliestPartner(): string | null {
+    if (!this.room) return null
+    const ps = Array.from(this.room.remoteParticipants.values()).filter((p) => isPartnerPeer(p))
+    ps.sort((a, b) => Number(a.joinedAt?.getTime?.() ?? 0) - Number(b.joinedAt?.getTime?.() ?? 0))
+    return ps[0]?.identity ?? null
+  }
+
+  /** A newly joined partner phone gets the running relay (its own short-lived URL is minted by the app, not re-sent here). */
+  get hasPartner() {
+    return this.partnerIds().length > 0
   }
 
   private onAgent(joined: boolean) {
@@ -184,7 +270,13 @@ export class DirectSttListener {
   private gated = false
   private watchdog: ReturnType<typeof setTimeout> | null = null
   private vad: VoiceActivityEmitter
-  constructor(private ev: ListenerEvents, private getUrl: () => Promise<{ wsUrl: string; maxSessionSeconds: number }>) {
+  private ownsStream = true
+  constructor(
+    private ev: ListenerEvents,
+    private getUrl: () => Promise<{ wsUrl: string; maxSessionSeconds: number }>,
+    /** Partner relay: reuse the microphone stream LiveKit already publishes instead of opening a second capture (never stopped by us). */
+    private opts: { stream?: () => MediaStream | null } = {},
+  ) {
     // Energy VAD on the captured 16 kHz PCM → onVoiceActivity (task: auto turn-taking silence clock).
     this.vad = new VoiceActivityEmitter(new EnergyVad(), (now) => this.ev.onVoiceActivity?.(now))
   }
@@ -192,7 +284,9 @@ export class DirectSttListener {
   async start() {
     this.ev.onStatus({ state: 'connecting' })
     this.vad.reset()
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } })
+    const shared = this.opts.stream?.() ?? null
+    this.ownsStream = !shared
+    this.stream = shared ?? (await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }))
     this.ctx = new AudioContext()
     const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET_SRC], { type: 'application/javascript' }))
     await this.ctx.audioWorklet.addModule(url)
@@ -246,7 +340,7 @@ export class DirectSttListener {
   private cleanupAudio() {
     if (this.watchdog) clearTimeout(this.watchdog)
     this.node?.disconnect()
-    this.stream?.getTracks().forEach((t) => t.stop())
+    if (this.ownsStream) this.stream?.getTracks().forEach((t) => t.stop()) // a shared (LiveKit) mic stream is never ours to stop
     this.ctx?.close().catch(() => undefined)
     this.node = null
     this.stream = null

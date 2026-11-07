@@ -6,7 +6,7 @@
  * candidate proof (which the client cannot forge or edit), that:
  *   - the text is an UNEDITED AI draft the server itself produced for this device,
  *   - its intent is non-committal (continue / clarify) and its risk is "none" (both recorded inside the signed proof),
- *   - the text has no commitment-shaped content (digits, money, links, "I agree", "I will" …),
+ *   - the text has no commitment-shaped content (money, links, "I agree", "I will" …),
  *   - the partner text it answers (bound by hash inside the proof) is not a health / money / consent / personal matter
  *     and is long enough to deserve a reply,
  *   - the declared pause and veto window are inside the allowed ranges, and

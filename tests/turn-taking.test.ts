@@ -461,17 +461,26 @@ describe('shared server/client auto-speak policy', () => {
     expect(m.TURN_TAKING.vetoMs).toEqual({ min: m.VETO_MIN_MS, max: m.VETO_MAX_MS })
     expect([...m.TURN_TAKING.allowedIntents]).toEqual(['continue', 'clarify'])
   })
-  it('isAutoSpeakable refuses digits, links, commitments, high-stakes words, risk and over-long text', async () => {
+  it('isAutoSpeakable refuses links, e-mail, commitments, high-stakes words, money, risk and over-long text', async () => {
     const { isAutoSpeakable } = await import('@/lib/turn-taking')
     expect(isAutoSpeakable({ text: 'Tell me more about that.', risk: 'none' })).toBe(true)
-    for (const text of ['Meet at 5 then.', 'See www.example.com', 'Yes, I agree.', 'I will pay you.', 'Is it the doctor again?', 'x'.repeat(300)]) {
+    for (const text of ['See www.example.com', 'Read https://example.com/x', 'Try example.com tonight', 'Write to me@example.org', 'Yes, I agree.', 'I will pay you.', 'Is it the doctor again?', 'It costs $5.', 'Is it 20 dollars?', 'x'.repeat(300)]) {
       expect(isAutoSpeakable({ text, risk: 'none' }), text).toBe(false)
     }
     expect(isAutoSpeakable({ text: 'Tell me more.', risk: 'medical' })).toBe(false)
   })
-  it('the browser picker never proposes text the server would refuse (digits are skipped)', () => {
-    const set = { candidates: [cand('a', 'continue', 'Tell me about the 5 pm plan.'), cand('b', 'clarify', 'Which plan do you mean?'), cand('c', 'decline', 'Not now.')] }
-    const r = pickCandidate(set, { intent: 'continue', partnerText: 'We should talk about the plan tomorrow.' })
-    expect(r.ok && r.candidate.id).toBe('b')
+  it('TODO1: numbers and dates are auto-speakable (only links are blocked)', async () => {
+    const { isAutoSpeakable } = await import('@/lib/turn-taking')
+    for (const text of ['What happens at 5 pm?', 'Tell me more about March 3rd.', 'Which room is it, 12 or 14?', 'Is the meeting on 03/04/2027?', 'Can you say that again, the 7:30 one?', 'Tell me about the 2026 plan.']) {
+      expect(isAutoSpeakable({ text, risk: 'none' }), text).toBe(true)
+    }
+  })
+  it('the browser picker proposes a draft with a number or date, but never one with a link', () => {
+    const withNumber = { candidates: [cand('a', 'continue', 'Tell me about the 5 pm plan.'), cand('b', 'clarify', 'Which plan do you mean?'), cand('c', 'decline', 'Not now.')] }
+    const r1 = pickCandidate(withNumber, { intent: 'continue', partnerText: 'We should talk about the plan tomorrow.' })
+    expect(r1.ok && r1.candidate.id).toBe('a')
+    const withLink = { candidates: [cand('a', 'continue', 'Tell me more at www.plan.example.'), cand('b', 'clarify', 'Which plan do you mean?'), cand('c', 'decline', 'Not now.')] }
+    const r2 = pickCandidate(withLink, { intent: 'continue', partnerText: 'We should talk about the plan tomorrow.' })
+    expect(r2.ok && r2.candidate.id).toBe('b')
   })
 })

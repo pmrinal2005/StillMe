@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from .config import IDLE_NO_AUDIO_S, OWNER_GONE_GRACE_S, SESSION_MAX_MINUTES
+from .config import IDLE_NO_AUDIO_S, SESSION_MAX_MINUTES, owner_gone_grace_s
 
 EndReason = Literal["timeout", "room_exit", "idle", "budget", "user", "phone_cap"]
 PauseReason = Literal["user", "idle", "error"]
@@ -28,6 +28,8 @@ class Watchdog:
     ended: EndReason | None = None
     phone_call_started: float | None = None
     phone_call_max_s: float | None = None
+    # Conversation mode decides how long a vanished owner is tolerated (partner-link / remote: 120 s, tabletop: 30 s).
+    mode: str = "tabletop"
 
     def __post_init__(self) -> None:
         self.max_minutes = max(1, min(self.max_minutes, SESSION_MAX_MINUTES))
@@ -75,7 +77,7 @@ class Watchdog:
             return "budget"
         if now - self.started_at >= self.max_minutes * 60:
             return "timeout"
-        if self.owner_gone_since is not None and now - self.owner_gone_since >= OWNER_GONE_GRACE_S:
+        if self.owner_gone_since is not None and now - self.owner_gone_since >= owner_gone_grace_s(self.mode):
             return "room_exit"
         if self.phone_call_started is not None and self.phone_call_max_s is not None and now - self.phone_call_started >= self.phone_call_max_s:
             return "phone_cap"

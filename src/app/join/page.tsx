@@ -10,8 +10,12 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { Room, RoomEvent, Track, type RemoteParticipant } from 'livekit-client'
-import { DataTopics, PresenceMessage } from '@/lib/contracts'
+import { DataTopics, PresenceMessage, RelayToPartner } from '@/lib/contracts'
 import { partnerPlaysLocally } from '@/lib/audio-routing'
+import { clearStoredClaim, formatRemaining, inviteInfo, parseInviteFromHash, readStoredClaim, writeStoredClaim, type InviteInfo } from '@/lib/invite-link'
+import { mapJoinError } from '@/lib/join-errors'
+import { isAssemblyStreamingUrl, isOwnerPeer } from '@/lib/relay'
+import { PartnerRelayStt } from '@/lib/client/partner-relay'
 import { Icon } from '@/components/ui/Icon'
 import { Backdrop, Logo, Orb, type OrbState } from '@/components/ui/Orb'
 
@@ -28,31 +32,91 @@ export default function JoinPage() {
   const [holdTurn, setHoldTurn] = useState(false)
   const [voiceSpeaking, setVoiceSpeaking] = useState(false)
   const [muted, setMuted] = useState(false)
+  const [fatal, setFatal] = useState(false)
+  const [rejoinable, setRejoinable] = useState(false)
+  const [info, setInfo] = useState<InviteInfo>({ state: 'missing' })
+  const [now, setNow] = useState(() => Date.now())
+  const [relayState, setRelayState] = useState<'off' | 'on'>('off')
   const roomRef = useRef<Room | null>(null)
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const relayRef = useRef<PartnerRelayStt | null>(null)
+  const leftOnPurpose = useRef(false)
 
   useEffect(() => {
-    const raw = decodeURIComponent(window.location.hash.replace(/^#/, ''))
+    // Never throws: a link cut by a chat app (`%E0%A4%A`) used to blank the page.
+    const raw = parseInviteFromHash(window.location.hash)
     setInvite(raw)
-    return () => void roomRef.current?.disconnect()
+    setInfo(inviteInfo(raw))
+    // Same phone, page reloaded / network changed: a stored claim lets the partner rejoin WITHOUT a second invite.
+    const stored = readStoredClaim(typeof sessionStorage !== 'undefined' ? sessionStorage : undefined)
+    if (stored) {
+      setRejoinable(true)
+      if (stored.label) setLabel(stored.label)
+    }
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => {
+      clearInterval(t)
+      void relayRef.current?.stop()
+      void roomRef.current?.disconnect()
+    }
   }, [])
 
-  const join = async () => {
+  const join = async (useClaim = false) => {
     setError(null)
+    setFatal(false)
     setPhase('joining')
     try {
-      const res = await fetch('/api/livekit/join', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ invite, label: label.trim() || 'Partner', consent: true }),
-      })
-      const body = await res.json()
-      if (!res.ok) throw new Error(body.error ?? `http_${res.status}`)
+      const stored = useClaim ? readStoredClaim(typeof sessionStorage !== 'undefined' ? sessionStorage : undefined) : null
+      let res: Response
+      try {
+        res = await fetch('/api/livekit/join', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(stored ? { claim: stored.claim, label: label.trim() || stored.label || 'Partner', consent: true } : { invite, label: label.trim() || 'Partner', consent: true }),
+        })
+      } catch {
+        throw Object.assign(new Error('network'), { status: 0 })
+      }
+      const body = await res.json().catch(() => ({}) as Record<string, unknown>)
+      if (!res.ok) throw Object.assign(new Error(String(body.error ?? `http_${res.status}`)), { status: res.status })
+      if (typeof body.claim === 'string' && typeof body.room === 'string') {
+        writeStoredClaim(typeof sessionStorage !== 'undefined' ? sessionStorage : undefined, { claim: body.claim, room: body.room, label: label.trim() || 'Partner', at: Date.now() })
+      }
+      leftOnPurpose.current = false
       const room = new Room({ audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       roomRef.current = room
       room
         .on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: RemoteParticipant, _k?: unknown, topic?: string) => {
-          if (topic !== DataTopics.presence || !participant || participant.isAgent) return
+          // Worker-less captions: only the room's OWNER (server-signed role attribute) may start/stop the relay on this phone.
+          if (topic === DataTopics.relay) {
+            if (!isOwnerPeer(participant)) return
+            try {
+              const m = RelayToPartner.safeParse(JSON.parse(dec.decode(payload)))
+              if (!m.success) return
+              if (m.data.type === 'relay' && m.data.on) {
+                if (!isAssemblyStreamingUrl(m.data.wsUrl)) return // never point this microphone anywhere but AssemblyAI streaming
+                void relayRef.current?.stop()
+                const r = new PartnerRelayStt({
+                  wsUrl: m.data.wsUrl,
+                  maxSessionSeconds: m.data.maxSessionSeconds,
+                  getStream: () => {
+                    const t = roomRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.track
+                    return t?.mediaStreamTrack ? new MediaStream([t.mediaStreamTrack]) : null
+                  },
+                  send: (msg) => void roomRef.current?.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(msg)), { reliable: true, topic: DataTopics.relay, destinationIdentities: [participant!.identity] }).catch(() => undefined),
+                })
+                relayRef.current = r
+                setRelayState('on')
+                void r.start().catch(() => setRelayState('off'))
+              } else if (m.data.type === 'relay' && !m.data.on) {
+                void relayRef.current?.stop()
+                relayRef.current = null
+                setRelayState('off')
+              } else if (m.data.type === 'relay_gate') relayRef.current?.gate(m.data.on, m.data.ttlMs)
+            } catch {}
+            return
+          }
+          if (topic !== DataTopics.presence || !isOwnerPeer(participant)) return // partners can publish data now (relay): only the owner's presence counts
           try {
             const m = PresenceMessage.safeParse(JSON.parse(dec.decode(payload)))
             if (!m.success) return
@@ -75,19 +139,28 @@ export default function JoinPage() {
           }
         })
         .on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()))
+        .on(RoomEvent.ParticipantDisconnected, (p) => {
+          if (isOwnerPeer(p)) {
+            void relayRef.current?.stop()
+            relayRef.current = null
+            setRelayState('off')
+          }
+        })
         .on(RoomEvent.ActiveSpeakersChanged, (speakers) => setVoiceSpeaking(speakers.some((s) => (s as RemoteParticipant).isAgent)))
-        .on(RoomEvent.Disconnected, () => setPhase('ended'))
+        .on(RoomEvent.Disconnected, () => {
+          void relayRef.current?.stop()
+          relayRef.current = null
+          setRelayState('off')
+          setPhase('ended')
+        })
       await room.connect(body.url, body.token)
       await room.localParticipant.setMicrophoneEnabled(true)
       setPhase('joined')
     } catch (e) {
-      const code = (e as Error).message
-      setError(
-        code === 'invite_invalid_or_expired' ? 'This invitation is invalid or has expired. Ask for a new link.'
-          : code === 'livekit_not_configured' ? 'Calling is not configured on this server.'
-            : code.includes('Permission') || code.includes('NotAllowed') ? 'Microphone permission is needed to talk.'
-              : `Could not join (${code}).`,
-      )
+      const v = mapJoinError((e as Error).message || (e as Error).name, (e as { status?: number }).status)
+      setError(v.message)
+      setFatal(v.fatal)
+      if (v.fatal) clearStoredClaim(typeof sessionStorage !== 'undefined' ? sessionStorage : undefined)
       setPhase('error')
       await roomRef.current?.disconnect()
     }
@@ -100,6 +173,10 @@ export default function JoinPage() {
     setMuted(!muted)
   }
   const leave = async () => {
+    leftOnPurpose.current = true
+    clearStoredClaim(typeof sessionStorage !== 'undefined' ? sessionStorage : undefined) // leaving on purpose: this phone does not silently rejoin
+    setRejoinable(false)
+    await relayRef.current?.stop()
     await roomRef.current?.disconnect()
     setPhase('ended')
   }
@@ -129,21 +206,32 @@ export default function JoinPage() {
                 <>The person you are talking with uses ReVOICE to communicate. Your speech will be <strong>transcribed live</strong> (by AssemblyAI) so they can read it and prepare replies.</>,
                 <>AI may draft reply options for them (Groq). <strong>They approve every word</strong> before anything is spoken.</>,
                 <>Their replies are spoken by a <strong>synthetic voice</strong>, which may be a clone of their own voice used with their consent.</>,
-                <>ReVOICE does not record audio or save transcripts. The link expires in 30 minutes.</>,
+                <>ReVOICE does not record audio or save transcripts. The link expires 30 minutes after it was created and works once; if this phone reloads you can rejoin without a new link.</>,
                 <>This is not an emergency service.</>,
               ].map((t, i) => (
                 <li key={i} className="flex gap-2"><span className="rv-badge rv-badge-brand h-6 shrink-0 px-2" aria-hidden="true">{i + 1}</span><span>{t}</span></li>
               ))}
             </ul>
-            {!invite && <p role="alert" className="rv-alert rv-alert-warn">This page needs an invitation link.</p>}
+            {info.state === 'missing' && !rejoinable && <p role="alert" className="rv-alert rv-alert-warn">This page needs an invitation link.</p>}
+            {info.state === 'malformed' && !rejoinable && <p role="alert" className="rv-alert rv-alert-warn">This link looks incomplete (a chat app may have cut it). Ask for the link again.</p>}
+            {info.state === 'expired' && !rejoinable && <p role="alert" className="rv-alert rv-alert-warn">This invitation has expired. Ask for a new link.</p>}
+            {info.state === 'valid' && info.exp && <p id="invite-expiry" role="status" className="rv-muted text-sm">This link expires in <strong>{formatRemaining(info.exp - now)}</strong>.</p>}
+            {rejoinable && <p role="status" className="rv-alert text-sm">You were in this conversation on this phone. You can rejoin without a new link.</p>}
             <label className="grid gap-1 text-sm font-semibold">Your name (optional, shown to them)
               <input className="rv-input font-normal" maxLength={40} value={label} onChange={(e) => setLabel(e.target.value)} />
             </label>
             <label className="rv-mode text-sm"><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> <span>I understand and agree to my speech being transcribed for this conversation.</span></label>
             {error && <p role="alert" className="rv-alert rv-alert-danger">{error}</p>}
-            <button className="rv-btn rv-btn-primary text-lg" disabled={!consent || !invite || phase === 'joining'} onClick={join}>
-              <Icon name="mic" size={18} /> {phase === 'joining' ? 'Joining…' : 'Join with microphone'}
-            </button>
+            <div className="flex flex-col gap-2 min-[400px]:flex-row">
+              {(rejoinable || fatal === false) && rejoinable && (
+                <button id="rejoin-button" className="rv-btn rv-btn-primary text-lg" disabled={!consent || phase === 'joining'} onClick={() => void join(true)}>
+                  <Icon name="mic" size={18} /> {phase === 'joining' ? 'Joining…' : 'Rejoin'}
+                </button>
+              )}
+              <button className={`rv-btn text-lg ${rejoinable ? '' : 'rv-btn-primary'}`} disabled={!consent || info.state !== 'valid' || (info.exp ? info.exp <= now : false) || phase === 'joining' || fatal} onClick={() => void join(false)}>
+                <Icon name="mic" size={18} /> {phase === 'joining' ? 'Joining…' : phase === 'error' && !fatal ? 'Try again' : 'Join with microphone'}
+              </button>
+            </div>
           </section>
         )}
 
@@ -156,6 +244,7 @@ export default function JoinPage() {
                   : composing ? <><Icon name="edit" size={24} /> They are composing a reply…</>
                     : <><Icon name="headphones" size={24} /> Listening</>}
             </div>
+            {relayState === 'on' && <p id="relay-indicator" role="status" className="rv-muted text-sm"><Icon name="mic" size={14} /> This phone is transcribing your speech so they can read it. Press Mute to pause.</p>}
             <ul className="grid gap-2 text-left text-sm sm:grid-cols-3">
               <li className="rv-panel p-3"><strong className="block">Speak, then pause</strong><span className="rv-muted">Give them time to compose — replies can take a little longer.</span></li>
               <li className="rv-panel p-3"><strong className="block">One question at a time</strong><span className="rv-muted">Yes/no is fine, but they may choose another answer.</span></li>
@@ -170,7 +259,8 @@ export default function JoinPage() {
 
         {phase === 'ended' && (
           <section className="rv-canvas rv-pop p-6 text-center">
-            <p className="text-lg font-semibold">You have left the conversation. You can close this page.</p>
+            <p className="text-lg font-semibold">{leftOnPurpose.current ? 'You have left the conversation. You can close this page.' : 'The conversation ended or the connection was lost.'}</p>
+            {!leftOnPurpose.current && rejoinable && <button className="rv-btn rv-btn-primary mt-3" onClick={() => { setPhase('consent'); setConsent(false) }}>Rejoin</button>}
           </section>
         )}
       </main>

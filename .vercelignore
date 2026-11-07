@@ -1,0 +1,16 @@
+# Files Vercel does not need to build or serve the Next.js app.
+worker/
+tests/
+scripts/live-smoke.mjs
+supabase/
+ecosystem.config.cjs
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+*.zip
+*.tar.gz
+coverage/
+.pytest_cache/
+__pycache__/

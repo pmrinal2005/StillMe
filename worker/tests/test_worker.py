@@ -343,3 +343,34 @@ def test_resolve_approval_secret_order(monkeypatch):
     monkeypatch.setenv("REVOICE_APPROVAL_SECRET", "explicit")
     assert config.resolve_approval_secret() == ("explicit", "explicit")
     assert config.load_env().approval_secret == "explicit"
+
+
+# ------------------------------------------------------------------ TODO3: owner-gone grace by conversation mode
+def test_owner_gone_grace_by_mode_mirrors_the_web_policy():
+    assert config.OWNER_GONE_GRACE_BY_MODE == {"tabletop": 30, "partner-link": 120, "remote": 120}
+    assert config.owner_gone_grace_s("tabletop") == 30
+    assert config.owner_gone_grace_s("partner-link") == 120
+    assert config.owner_gone_grace_s("remote") == 120
+    assert config.owner_gone_grace_s(None) == 30
+    assert config.owner_gone_grace_s("something-new") == 30  # unknown mode -> the strict tabletop value
+
+
+def test_watchdog_waits_longer_for_a_vanished_owner_in_partner_modes():
+    for mode, grace in (("tabletop", 30), ("partner-link", 120), ("remote", 120)):
+        w = Watchdog(started_at=0, max_minutes=20, mode=mode)
+        w.owner_left(100)
+        assert w.check(100 + grace - 1) is None, mode
+        assert w.check(100 + grace) == "room_exit", mode
+    # a partner-link owner whose phone blinks for 60 s is NOT dropped (it was, at 30 s)
+    w = Watchdog(started_at=0, max_minutes=20, mode="partner-link")
+    w.owner_left(100)
+    assert w.check(160) is None
+    w.owner_returned()
+    assert w.check(1000) is None
+
+
+def test_watchdog_default_mode_is_tabletop():
+    w = Watchdog(started_at=0)
+    assert w.mode == "tabletop"
+    w.owner_left(0)
+    assert w.check(config.OWNER_GONE_GRACE_S) == "room_exit"

@@ -9,6 +9,56 @@ ReVOICE is an assistive communication (AAC) prototype. It is **not** an autonomo
 
 ---
 
+## 0k. Partner link, worker-less captions, mode-aware session end, numbers/dates in auto-speak (this release)
+
+Deploys on **Vercel** (Next.js preset, `vercel.json` + `.vercelignore` included). No Cloudflare, no Hono, no sign-in anywhere.
+
+| TODO | What was wrong | Fix | Where |
+|---|---|---|---|
+| 1 | Auto-speak refused every draft containing a digit, so "What time on March 3rd?" was never proposed | `SPECIFICS` now blocks **links and e-mail addresses only**. Numbers and dates are allowed. Money, health, legal, consent and commitments stay blocked by `HIGH_STAKES` / `COMMITMENT` / the `risk` category, on the browser **and** in the server backstop | `src/lib/turn-taking.ts`, `tests/turn-taking.test.ts`, `tests/auto-approval.test.ts` |
+| 2 | Invite was **burned before** the LiveKit token was minted, so any error after that locked the partner out | Token + claim are minted **first**, the invite is consumed second | `src/app/api/livekit/join/route.ts` |
+| 2 | A partner whose phone reloaded, locked or changed network could never get back in (single-use link) | **Claim-based rejoin.** A successful join returns a signed claim (`rvc1.<room>.<partner identity>.<exp>.<sig>`, bound to the owner, expires with the room, max 30 min). The same phone keeps it in `sessionStorage` and gets a new token for the **same identity** with a **Rejoin** button. Leaving on purpose clears it | `src/lib/server/livekit.ts`, `src/lib/invite-link.ts`, `src/app/join/page.tsx` |
+| 2 | Rooms closed after 120 s empty / 30 s departure, too short for a partner to open a link or for a phone to reload | Partner-link / remote rooms: **300 s / 120 s**. Tabletop keeps 120 / 30 | `src/lib/session-policy.ts` |
+| 2 | `decodeURIComponent(location.hash)` threw on a link cut by a chat app and blanked the page | `parseInviteFromHash` never throws; strips whitespace and trailing punctuation; accepts `#invite=` and double-encoded values | `src/lib/invite-link.ts` |
+| 2 | Raw codes (`http_502`, `Could not join (join_failed)`) shown to a partner | One plain-language message per error, with a *fatal* flag that hides Retry | `src/lib/join-errors.ts` |
+| 2 | No expiry shown | Partner page shows a live countdown and disables Join when expired; owner sees *Partner link expires in 28 min 10 s* | `join/page.tsx`, `ReVoiceApp.tsx` |
+| 2 (bug found by the local e2e) | `/api/livekit/session` returned `invite` as the whole `{invite, jti, exp}` **object**, so the owner's link read `/join#[object Object]` | Returns the string, plus `inviteExpiresAt` | `src/app/api/livekit/session/route.ts` |
+| 3 | With no worker deployed, partner-link / remote sessions showed no captions and were **auto-killed after 45 s** | **Partner-phone relay STT.** The owner reserves minutes (same ledger) and sends the partner's phone a short-lived AssemblyAI URL **addressed to that one partner**; the phone transcribes its own mic (the track LiveKit already publishes) and relays turn text back. It never runs next to a working worker (no two paid streams), stops when the worker returns or the partner leaves, and the owner's voice gates it (`relay_gate`) | `src/lib/client/partner-relay.ts`, `listening.ts`, `ReVoiceApp.tsx`, `src/lib/relay.ts` |
+| 3 | Only the owner device could be trusted for control | Relay is locked down: commands accepted only from `role=owner`; turns only from the targeted `partner-…` (server-signed `role` attribute); URL must be `wss://streaming[.eu].assemblyai.com/v3/ws?`; relay messages carry **text only**, never an approval, so relay text can never become speech | `relay.ts`, `contracts.ts` |
+| 3 | The 45 s worker-absent kill and "the session ends automatically" wording applied to every mode | Only **tabletop** is ever ended for a missing worker, and only when browser listening is unavailable. Partner modes stay open and say so | `ReVoiceApp.tsx`, `workerAbsentAction()` |
+| 3 | `pagehide` ended partner sessions (locking the owner's phone dropped the partner) | `backgroundPolicy(mode)`: tabletop ends on pagehide / 3 min hidden; **partner modes never end on pagehide** (10 min hidden limit; bfcache restores ignored) | `session-policy.ts`, `ReVoiceApp.tsx` |
+| 3 | Worker closed the room 30 s after the owner's connection blinked, in every mode | `OWNER_GONE_GRACE_BY_MODE`: tabletop **30 s**, partner-link / remote **120 s** (web and worker constants are tested to match) | `worker/revoice_worker/config.py`, `watchdog.py`, `main.py` |
+| hygiene | `.env.example` had `NEXT_PUBLIC_SUPABASE_*` (2 failing tests); a duplicate `env.example` | Rewritten and complete, duplicate removed, `.vercelignore` added | `.env.example`, `.vercelignore` |
+
+### Checks (this pass)
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm test` | 24 files, **467** tests pass (was 423/425) |
+| `cd worker && pytest -q` | **120** pass (+3 for owner-gone grace by mode) |
+| `npm run build` + `postbuild` secret scan | pass, 41 browser files, no leaks |
+| AssemblyAI key, REST `/v2/transcript` | 200 |
+| AssemblyAI key, streaming token mint | 200 |
+| TTS with numbers and dates ("5 pm on March 3rd, room 12", "03/04/2027 at 7:30") | 200, audio returned, billed per character |
+| `npm run smoke:live` (providers) | **28/28**: 24 library voices, Hindi rejected 422, `universal-3-6-pro` STT round trip |
+| `npm run smoke:live` against the production build | **41/41** |
+| `npm run smoke:worker` (plugin TTS to plugin STT to TurnAdapter) | all pass |
+| **Local LiveKit server e2e** (real `livekit-server` 1.9.0 + real routes, `node /tmp/e2e` style) | **24/24**: forged/garbage invite and claim refused, valid join returns claim, partner token = mic + data only, invite burned after use, claim rejoin keeps the same identity, swapped-identity claim refused, partner room really has 300 s / 120 s timeouts (tabletop 120 / 30), relay URL minted and **handshakes with AssemblyAI**, relay pseudo-session settles, rejoin after the room ended is `410 session_ended` |
+
+### Limits from the docs (re-read this pass)
+
+* **LiveKit Build (quotas-and-limits):** 5 concurrent agent sessions, 1,000 agent minutes, 5,000 WebRTC participant minutes, 50 GB transfer, **$2.50** Inference credit, 100 participants, Server API 1,000 req/min, agent cold start **10 to 20 s**, 1 US number and 50 inbound minutes, 1,000 third-party SIP minutes. The allowance is a **hard cap** on the free plan. Custom-voice cloning through LiveKit Inference is not available on Build, which is why this app clones through AssemblyAI directly.
+* **AssemblyAI:** free accounts open **5 new streaming sessions per minute**, pay-as-you-go starts at 100. `/api/stt-token` refuses early with a retryable `stt_rate_limited`. The relay reserves its minutes through this same route, so it is counted and capped like any listening.
+
+### Honest limits of this release
+
+* The relay needs the partner's phone to keep the page open (a locked phone stops its microphone). The owner is told when the relay stops.
+* Only the earliest partner transcribes; a second partner's speech is not captioned while a relay is on (never two paid streams on one room).
+* The browser parts (join page, relay worklet) were verified by type-check, unit tests and the real server routes, not by a physical phone.
+* Groq was not configured in this sandbox. Its logic is covered by the mocked tests.
+* **Never put the AssemblyAI key in a file.** Add it in Vercel, Settings, Environment Variables. The key used for these checks was shared in chat: rotate it.
+
 ## 0j. Listening-quota lockout + unclickable suggestion cards (this release)
 
 **Reported:** (1) *Start listening* hung, then said `Could not start listening (stt daily minutes)`. (2) After speech was processed, the suggestion cards could not be clicked or applied to the composer.

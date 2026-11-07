@@ -1054,7 +1054,7 @@ async def entrypoint(ctx: Any) -> None:
         expect=Expectation(meta.ownerSub, meta.conversationId, ctx.room.name, meta.generation),  # approvals are signed for the USER id
         replay=MemoryReplayStore(),
     )
-    owner = OwnerRoom(ctx=ctx, env=env, meta=meta, gate=gate, watchdog=Watchdog(started_at=time.monotonic(), max_minutes=meta.maxSessionMinutes))
+    owner = OwnerRoom(ctx=ctx, env=env, meta=meta, gate=gate, watchdog=Watchdog(started_at=time.monotonic(), max_minutes=meta.maxSessionMinutes, mode=meta.mode))
     ctx.add_shutdown_callback(lambda *_: owner.end("room_exit"))
     await owner.start()
     await owner.run_watchdog()
