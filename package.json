@@ -19,6 +19,7 @@
     "dexie": "^4.4.7",
     "livekit-client": "^2.23.0",
     "livekit-server-sdk": "^2.19.2",
+    "motion": "^12.43.0",
     "next": "^16.4.3",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

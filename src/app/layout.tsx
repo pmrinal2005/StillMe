@@ -3,10 +3,11 @@ import './globals.css'
 import { ServiceWorker } from '@/components/ServiceWorker'
 
 export const metadata: Metadata = {
-  title: 'ReVOICE — human-gated conversational voice',
+  title: { default: 'StillMe | Still me. Still speaking.', template: '%s' },
   description: 'Assistive communication: AI listens and drafts, the person approves the exact words, their authorized voice speaks.',
   manifest: '/manifest.webmanifest',
-  applicationName: 'ReVOICE',
+  applicationName: 'StillMe',
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : 'https://stillmee.vercel.app')),
   // B7: explicit icons — browsers request /favicon.ico by default, which used to 404 (console error).
   icons: {
     icon: [
@@ -32,12 +33,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+        <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
       </head>
       <body className="min-h-dvh antialiased">
-        <nav aria-label="Skip links">
-          <a href="#composer-input" className="sr-only-focusable rv-btn absolute left-2 top-2 z-50">Skip to message composer</a>
-        </nav>
         {children}
         <ServiceWorker />
       </body>

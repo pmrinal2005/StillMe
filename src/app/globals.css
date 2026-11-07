@@ -425,10 +425,14 @@ html[data-contrast="high"] .rv-rail-btn { color: #fff; border: 2px solid #fff; }
 html[data-contrast="high"] .rv-rail-btn[aria-current="page"] { background: #fff; color: #000; }
 
 .rv-logo {
-  width: 2.6rem; height: 2.6rem; border-radius: 0.95rem; display: grid; place-items: center; flex: none;
-  background: radial-gradient(circle at 30% 25%, #fff 0 18%, #ffc4e6 40%, #c4b5fd 70%, #8ee6f0);
-  box-shadow: inset -4px -6px 10px rgba(110, 60, 200, 0.28), 0 6px 16px -6px rgba(214, 64, 170, 0.5);
+  width: 2.6rem; height: 2.6rem; border-radius: 50%; display: grid; place-items: center; flex: none;
+  box-shadow: 0 6px 16px -6px rgba(214, 64, 170, 0.5);
 }
+.rv-brand { display: inline-flex; align-items: center; gap: 0.65rem; min-width: 0; color: inherit; text-decoration: none; border-radius: 0.9rem; }
+.rv-brand:hover .rv-wordmark { opacity: 0.85; }
+.rv-wordmark { font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
+.rv-wordmark b { font-weight: 800; background: linear-gradient(100deg, var(--pink-deep), var(--violet)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+html[data-contrast="high"] .rv-wordmark b { color: #ffd400; background: none; }
 
 /* ---------------------------------------------------------------- caption bubbles */
 .rv-bubble {

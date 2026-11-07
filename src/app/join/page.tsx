@@ -189,12 +189,12 @@ export default function JoinPage() {
         <header className="rv-enter flex items-center gap-3">
           <Logo />
           <div>
-            <p className="text-lg font-extrabold tracking-tight">ReVOICE</p>
+            <p className="text-lg font-extrabold tracking-tight">StillMe</p>
             <p className="rv-muted text-xs font-semibold">Partner view</p>
           </div>
         </header>
         <div className="rv-enter rv-enter-d1 grid justify-items-center gap-4 py-2 text-center sm:gap-6 sm:py-4">
-          <h1 className="rv-hero-title">Join a <span className="rv-gradient-text">ReVOICE</span> conversation</h1>
+          <h1 className="rv-hero-title">Join a <span className="rv-gradient-text">StillMe</span> conversation</h1>
           <Orb state={orbState} size={phase === 'joined' ? 170 : 120} reflection={phase === 'joined'} />
         </div>
 
@@ -203,10 +203,10 @@ export default function JoinPage() {
             <h2 id="disclosure-h" className="rv-section-title">Before you join</h2>
             <ul className="grid gap-2 text-sm">
               {[
-                <>The person you are talking with uses ReVOICE to communicate. Your speech will be <strong>transcribed live</strong> (by AssemblyAI) so they can read it and prepare replies.</>,
+                <>The person you are talking with uses StillMe to communicate. Your speech will be <strong>transcribed live</strong> (by AssemblyAI) so they can read it and prepare replies.</>,
                 <>AI may draft reply options for them (Groq). <strong>They approve every word</strong> before anything is spoken.</>,
                 <>Their replies are spoken by a <strong>synthetic voice</strong>, which may be a clone of their own voice used with their consent.</>,
-                <>ReVOICE does not record audio or save transcripts. The link expires 30 minutes after it was created and works once; if this phone reloads you can rejoin without a new link.</>,
+                <>StillMe does not record audio or save transcripts. The link expires 30 minutes after it was created and works once; if this phone reloads you can rejoin without a new link.</>,
                 <>This is not an emergency service.</>,
               ].map((t, i) => (
                 <li key={i} className="flex gap-2"><span className="rv-badge rv-badge-brand h-6 shrink-0 px-2" aria-hidden="true">{i + 1}</span><span>{t}</span></li>

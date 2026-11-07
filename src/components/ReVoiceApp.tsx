@@ -592,7 +592,7 @@ export function ReVoiceApp() {
     if (!navigator.onLine) {
       // Offline: the user's press authorizes local playback of a previously cached library-voice phrase.
       if (opts.cacheable && (await playCachedOffline(text))) return setLastSpoken(text)
-      setNotice(prefsRef.current.deviceVoiceFallback ? 'Offline: your ReVOICE voice needs a connection. Use the device voice, large text, or your message bank.' : 'Offline: your ReVOICE voice needs a connection. Use large text or your message bank.')
+      setNotice(prefsRef.current.deviceVoiceFallback ? 'Offline: your StillMe voice needs a connection. Use the device voice, large text, or your message bank.' : 'Offline: your StillMe voice needs a connection. Use large text or your message bank.')
       return
     }
     const src = composerSourceRef.current
@@ -793,7 +793,7 @@ export function ReVoiceApp() {
     }
     if (!prefsRef.current.aiSuggestions) return setNotice('Auto turn-taking needs AI suggestions. Turn on “Show AI-drafted suggestions” in Settings first.')
     if (!statusRef.current?.providers.groq) return setNotice('Auto turn-taking needs the suggestion service (Groq), which is not configured on this server.')
-    const ok = window.confirm('Turn on auto turn-taking?\n\nAfter your partner pauses, ReVOICE will draft a reply and speak it in your voice after a short countdown — unless you cancel it, type, or touch the suggestions.\n\nIt never replies to health, legal, money or consent topics and never agrees to things for you. You can turn it off at any time.')
+    const ok = window.confirm('Turn on auto turn-taking?\n\nAfter your partner pauses, StillMe will draft a reply and speak it in your voice after a short countdown — unless you cancel it, type, or touch the suggestions.\n\nIt never replies to health, legal, money or consent topics and never agrees to things for you. You can turn it off at any time.')
     if (!ok) return
     update({ autoTurn: true })
     humanActed()
@@ -1342,8 +1342,10 @@ export function ReVoiceApp() {
           <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <div className="flex min-w-0 items-center gap-3">
               <div className="min-w-0">
-                <p className="text-lg font-extrabold tracking-tight">ReVOICE</p>
-                <p className="rv-muted truncate text-xs font-semibold">Human-gated voice · you approve every word</p>
+                <a href="/" className="rv-brand" aria-label="StillMe, back to the home page">
+                  <span className="rv-wordmark text-lg">Still<b>Me</b></span>
+                </a>
+                <p className="rv-muted truncate text-xs font-semibold">Still me. Still speaking. · you approve every word</p>
               </div>
             </div>
           </header>
@@ -1362,14 +1364,14 @@ export function ReVoiceApp() {
           {/* ------------------------------------------------ hero + orb */}
           <section aria-labelledby="hero-h" className={`rv-hero grid justify-items-center text-center ${home ? 'mt-5 gap-2 sm:mt-7 sm:gap-3' : 'is-compact mt-4 gap-2 sm:mt-5'}`}>
             <h1 id="hero-h" className="rv-hero-title rv-enter">
-              <span className="sr-only">ReVOICE: AI listens, you approve every word, your voice speaks.</span>
+              <span className="sr-only">StillMe: AI listens, you approve every word, your voice speaks.</span>
               <span aria-hidden="true">
                 <span className="rv-fade-word">AI Listens.</span> You Approve <span className="rv-fade-word-r">Every</span>
                 <br />
                 <span className="rv-gradient-text">Word You Speak</span>
               </span>
             </h1>
-            {home && <p className="rv-hero-lede rv-muted rv-enter rv-enter-d1 hidden max-w-xl text-base sm:block">Your partner speaks, ReVOICE drafts three options, and nothing is said until you approve the exact words.</p>}
+            {home && <p className="rv-hero-lede rv-muted rv-enter rv-enter-d1 hidden max-w-xl text-base sm:block">Your partner speaks, StillMe drafts three options, and nothing is said until you approve the exact words.</p>}
             <div className={`rv-hero-orb rv-enter rv-enter-d2 ${home ? 'my-2 sm:my-3' : 'my-1'}`}>
               <Orb state={orbState} size={home ? 150 : 84} reflection={home} />
             </div>
@@ -1436,7 +1438,7 @@ export function ReVoiceApp() {
                   </div>
                   <div className="rv-composer-actions">
                     {prefs.deviceVoiceFallback && cloudVoiceDown && (
-                      <button data-scan className="rv-btn text-sm" disabled={!composer.trim()} onClick={() => speakDevice(composer)} title="Uses this device's built-in voice, not your ReVOICE voice">
+                      <button data-scan className="rv-btn text-sm" disabled={!composer.trim()} onClick={() => speakDevice(composer)} title="Uses this device's built-in voice, not your StillMe voice">
                         <Icon name="voice" size={15} /> <span className="sm:hidden">Device voice</span><span className="hidden sm:inline">Speak with device voice</span>
                       </button>
                     )}
@@ -1627,7 +1629,7 @@ export function ReVoiceApp() {
           </div>
 
           <footer className="rv-muted mx-auto mt-6 max-w-3xl text-center text-xs sm:mt-8">
-            ReVOICE is an assistive-communication prototype, not a medical device. Do not use with real health information. AI suggestions are drafts; nothing is spoken without your approval of the exact words.
+            StillMe is an assistive-communication prototype, not a medical device. Do not use with real health information. AI suggestions are drafts; nothing is spoken without your approval of the exact words.
           </footer>
         </main>
       </div>

@@ -49,7 +49,7 @@ export function SettingsPanel({ prefs, update }: { prefs: Prefs; update: (p: Par
 
       <fieldset className="rv-panel grid gap-3 p-4">
         <legend className="rv-badge rv-badge-brand px-3 text-sm">Languages</legend>
-        <label className="grid text-sm">Spoken-output language (what ReVOICE says)
+        <label className="grid text-sm">Spoken-output language (what StillMe says)
           <select className="rv-input" value={prefs.outputLanguage} onChange={(e) => update({ outputLanguage: e.target.value as OutputLanguage })}>
             {OUTPUT_LANGUAGES.map((l) => <option key={l} value={l}>{OUTPUT_LANGUAGE_LABELS[l]}</option>)}
           </select>

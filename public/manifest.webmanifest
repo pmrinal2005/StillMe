@@ -1,8 +1,8 @@
 {
-  "name": "ReVOICE",
-  "short_name": "ReVOICE",
-  "description": "Human-gated conversational voice prosthesis",
-  "start_url": "/",
+  "name": "StillMe",
+  "short_name": "StillMe",
+  "description": "Still me. Still speaking. Human-gated conversational voice: AI listens and drafts, you approve every word.",
+  "start_url": "/dashboard",
   "display": "standalone",
   "background_color": "#f6f3fb",
   "theme_color": "#f6f3fb",
@@ -25,5 +25,7 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
-  ]
+  ],
+  "scope": "/",
+  "id": "/"
 }

@@ -34,10 +34,10 @@ export function TurnTakingSettings({ prefs, update, onToggle, compact = false }:
       <legend className="rv-badge rv-badge-brand px-3 text-sm">Auto turn-taking</legend>
       <label className="flex gap-2 text-sm font-semibold">
         <input type="checkbox" checked={prefs.autoTurn} onChange={(e) => onToggle(e.target.checked)} />
-        <span>Let ReVOICE reply after my partner pauses (you can cancel every reply)</span>
+        <span>Let StillMe reply after my partner pauses (you can cancel every reply)</span>
       </label>
       <p id={`${uid}-note`} className="rv-muted text-xs">
-        Off by default. When on: after your partner stops, ReVOICE drafts a reply, shows it, and speaks it in your voice after a countdown — unless you press Cancel, type, or touch the suggestions.
+        Off by default. When on: after your partner stops, StillMe drafts a reply, shows it, and speaks it in your voice after a countdown — unless you press Cancel, type, or touch the suggestions.
         It never replies to health, legal, money or consent topics, never agrees to things for you, and pauses after {MAX_CONSECUTIVE_AUTO} automatic replies in a row until you act.
       </p>
       {!compact && (
